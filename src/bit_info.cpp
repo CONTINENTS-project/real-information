@@ -51,3 +51,15 @@ extern "C" {
 		return pick_bits_to_shave_binary_search_template<double>(A, n_elem, tolerance, nbits_old);
 	}
 }
+
+extern "C" {
+	double entropy_double(double *A, size_t n_elem) {
+		return bitpattern_entropy<double>(A, n_elem);
+	}
+}
+
+extern "C" {
+	double entropy_float(float *A, size_t n_elem) {
+		return bitpattern_entropy<float>(A, n_elem);
+	}
+}

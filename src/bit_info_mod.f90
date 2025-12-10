@@ -71,6 +71,18 @@ interface
     integer(c_int) :: bits
   end function 
 
+  module function entropy_float(a, n_elem) result(h) bind(C, name="entropy_float")
+    real(c_float), dimension(*)  :: a
+    integer(c_int), value         :: n_elem
+    real(c_double)                :: h
+  end function
+
+  module function entropy_double(a, n_elem) result(h) bind(C, name="entropy_double")
+    real(c_double), dimension(*)  :: a
+    integer(c_int), value         :: n_elem
+    real(c_double)                :: h
+  end function
+
 end interface
 
 interface shave
@@ -91,6 +103,11 @@ end interface
 interface pick_bits_to_shave_binary_search
   module procedure pick_bits_to_shave_binary_search_float
   module procedure pick_bits_to_shave_binary_search_double
+end interface
+
+interface entropy
+  module procedure entropy_float
+  module procedure entropy_double
 end interface
 
 end module bit_info

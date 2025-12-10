@@ -53,7 +53,7 @@ void bit_count(T *A, size_t n_elem, size_t *c) {
 	}
 }
 
-/* Computes Shannon entropy for A */
+/* Computes Shannon entropy for an array of probabilities, A */
 double entropy(double *A, size_t n_elem) {
 	double H = 0;
 
@@ -64,6 +64,31 @@ double entropy(double *A, size_t n_elem) {
 	}
 
 	return H;
+}
+
+template <typename T>
+double bitpattern_entropy(T *A, size_t n_elem) {
+  double p;
+  double H = 0;
+  size_t count = 1;
+
+  T *A_sorted = new T[n_elem];
+  std::memcpy(A_sorted, A, n_elem * sizeof(T));
+  std::sort(A_sorted, A_sorted + n_elem);
+  for (size_t i = 0; i < n_elem-1; i++) {
+    if (A_sorted[i+1] == A_sorted[i]) {
+      count += 1;
+    } else {
+      p = static_cast<double>(count)/static_cast<double>(n_elem);
+      H += -p * std::log2(p);
+      count = 1;
+    }
+  }
+
+  p = static_cast<double>(count)/static_cast<double>(n_elem);
+  H += -p * std::log2(p);
+  delete[] A_sorted;
+  return H;
 }
 
 /* Helper function to compute pair counts at a particular position in 
