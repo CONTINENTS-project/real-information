@@ -18,6 +18,27 @@ interface
     real(c_float), dimension(*) :: shaved
   end subroutine 
 
+  module subroutine halfshave_float(a, n_elem, n, halfshaved) bind(C, name="halfshave_float")
+    real(c_float), dimension(*) :: a
+    integer(c_int), value :: n_elem
+    integer(c_int), value :: n
+    real(c_float), dimension(*) :: halfshaved
+  end subroutine 
+
+  module subroutine set_float(a, n_elem, n, set) bind(C, name="set_float")
+    real(c_float), dimension(*) :: a
+    integer(c_int), value :: n_elem
+    integer(c_int), value :: n
+    real(c_float), dimension(*) :: set
+  end subroutine 
+
+  module subroutine groom_float(a, n_elem, n, groomed) bind(C, name="groom_float")
+    real(c_float), dimension(*) :: a
+    integer(c_int), value :: n_elem
+    integer(c_int), value :: n
+    real(c_float), dimension(*) :: groomed
+  end subroutine 
+
   module function preserved_information_float(a, b, n_elem) result(preserved) bind(C, name="preserved_information_float")
     real(c_float), dimension(*) :: a
     real(c_float), dimension(*) :: b
@@ -38,6 +59,27 @@ interface
     integer(c_int), value :: n_elem
     integer(c_int), value :: n
     real(c_double), dimension(*) :: shaved
+  end subroutine 
+
+  module subroutine halfshave_double(a, n_elem, n, halfshaved) bind(C, name="halfshave_double")
+    real(c_double), dimension(*) :: a
+    integer(c_int), value :: n_elem
+    integer(c_int), value :: n
+    real(c_double), dimension(*) :: halfshaved
+  end subroutine 
+
+  module subroutine set_double(a, n_elem, n, set) bind(C, name="set_double")
+    real(c_double), dimension(*) :: a
+    integer(c_int), value :: n_elem
+    integer(c_int), value :: n
+    real(c_double), dimension(*) :: set
+  end subroutine 
+
+  module subroutine groom_double(a, n_elem, n, groomed) bind(C, name="groom_double")
+    real(c_double), dimension(*) :: a
+    integer(c_int), value :: n_elem
+    integer(c_int), value :: n
+    real(c_double), dimension(*) :: groomed
   end subroutine 
 
   module function preserved_information_double(a, b, n_elem) result(preserved) bind(C, name="preserved_information_double")
@@ -88,6 +130,21 @@ end interface
 interface shave
   module procedure shave_float
   module procedure shave_double
+end interface
+
+interface halfshave
+  module procedure halfshave_float
+  module procedure halfshave_double
+end interface
+
+interface set
+  module procedure set_float
+  module procedure set_double
+end interface
+
+interface groom
+  module procedure groom_float
+  module procedure groom_double
 end interface
 
 interface preserved_information

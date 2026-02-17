@@ -96,39 +96,57 @@ int main() {
     bitwise_real_information(x, n_elements, data);
     mutual_information(x, xs, n_elements, data);
     auto p = preserved_information_template<float>(x, xs, n_elements);
-    std::cout << "mutual information\n" << data[0] << "\n"
-                                        << data[1] << "\n"
-                                        << data[2] << "\n"
-                                        << data[3] << "\n"
-                                        << data[4] << "\n"
-                                        << data[5] << "\n"
-                                        << data[6] << "\n"
-                                        << data[7] << "\n"
-                                        << data[8] << "\n"
-                                        << data[9] << "\n"
-                                        << data[10] << "\n"
-                                        << data[11] << "\n"
-                                        << data[12] << "\n"
-                                        << data[13] << "\n"
-                                        << data[14] << "\n"
-                                        << data[15] << "\n"
-                                        << data[16] << "\n"
-                                        << data[17] << "\n"
-                                        << data[18] << "\n"
-                                        << data[19] << "\n"
-                                        << data[20] << "\n"
-                                        << data[21] << "\n"
-                                        << data[22] << "\n"
-                                        << data[23] << "\n"
-                                        << data[24] << "\n"
-                                        << data[25] << "\n"
-                                        << data[26] << "\n"
-                                        << data[27] << "\n"
-                                        << data[28] << "\n"
-                                        << data[29] << "\n"
-                                        << data[30] << "\n"
-                                        << data[31] << "\n";
+
+    float xr[n_elements];
+    float xrs[n_elements];
+    double data_r[32];
+    //for (int i = 0; i < n_elements; i++) xr[i] = x[n_elements - i - 1];
+    for (int i = 0; i < n_elements; i++) xr[i] = x[i];
+    xr[0] = x[10];
+    xr[10] = x[20];
+    xr[20] = x[50];
+    xr[50] = x[0];
+    shave_template(xr, n_elements, 3, xrs);
+    bit_count_entropy(xr, n_elements, data_r);
+    redundancy(xr, xrs, n_elements, data_r);
+    bitwise_real_information(xr, n_elements, data_r);
+    mutual_information(xr, xrs, n_elements, data_r);
+    auto pr = preserved_information_template<float>(xr, xrs, n_elements);
+
+    std::cout << "mutual information\n" << data[0]  << " " << data_r[0]  << " " << data[0]  - data_r[0]  << "\n"
+                                        << data[1]  << " " << data_r[1]  << " " << data[1]  - data_r[1]  << "\n"
+                                        << data[2]  << " " << data_r[2]  << " " << data[2]  - data_r[2]  << "\n"
+                                        << data[3]  << " " << data_r[3]  << " " << data[3]  - data_r[3]  << "\n"
+                                        << data[4]  << " " << data_r[4]  << " " << data[4]  - data_r[4]  << "\n"
+                                        << data[5]  << " " << data_r[5]  << " " << data[5]  - data_r[5]  << "\n"
+                                        << data[6]  << " " << data_r[6]  << " " << data[6]  - data_r[6]  << "\n"
+                                        << data[7]  << " " << data_r[7]  << " " << data[7]  - data_r[7]  << "\n"
+                                        << data[8]  << " " << data_r[8]  << " " << data[8]  - data_r[8]  << "\n"
+                                        << data[9]  << " " << data_r[9]  << " " << data[9]  - data_r[9]  << "\n"
+                                        << data[10] << " " << data_r[10] << " " << data[10] - data_r[10] << "\n"
+                                        << data[11] << " " << data_r[11] << " " << data[11] - data_r[11] << "\n"
+                                        << data[12] << " " << data_r[12] << " " << data[12] - data_r[12] << "\n"
+                                        << data[13] << " " << data_r[13] << " " << data[13] - data_r[13] << "\n"
+                                        << data[14] << " " << data_r[14] << " " << data[14] - data_r[14] << "\n"
+                                        << data[15] << " " << data_r[15] << " " << data[15] - data_r[15] << "\n"
+                                        << data[16] << " " << data_r[16] << " " << data[16] - data_r[16] << "\n"
+                                        << data[17] << " " << data_r[17] << " " << data[17] - data_r[17] << "\n"
+                                        << data[18] << " " << data_r[18] << " " << data[18] - data_r[18] << "\n"
+                                        << data[19] << " " << data_r[19] << " " << data[19] - data_r[19] << "\n"
+                                        << data[20] << " " << data_r[20] << " " << data[20] - data_r[20] << "\n"
+                                        << data[21] << " " << data_r[21] << " " << data[21] - data_r[21] << "\n"
+                                        << data[22] << " " << data_r[22] << " " << data[22] - data_r[22] << "\n"
+                                        << data[23] << " " << data_r[23] << " " << data[23] - data_r[23] << "\n"
+                                        << data[24] << " " << data_r[24] << " " << data[24] - data_r[24] << "\n"
+                                        << data[25] << " " << data_r[25] << " " << data[25] - data_r[25] << "\n"
+                                        << data[26] << " " << data_r[26] << " " << data[26] - data_r[26] << "\n"
+                                        << data[27] << " " << data_r[27] << " " << data[27] - data_r[27] << "\n"
+                                        << data[28] << " " << data_r[28] << " " << data[28] - data_r[28] << "\n"
+                                        << data[29] << " " << data_r[29] << " " << data[29] - data_r[29] << "\n"
+                                        << data[30] << " " << data_r[30] << " " << data[30] - data_r[30] << "\n"
+                                        << data[31] << " " << data_r[31] << " " << data[31] - data_r[31] << "\n";
     std::cout << "p " << p << '\n';
+    std::cout << "pr " << pr << '\n';
     
     //for (int i = 0; i < 32; i++) {
     //    std::cout << data[i] << '\n';

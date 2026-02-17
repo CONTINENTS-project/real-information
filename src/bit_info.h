@@ -1,6 +1,7 @@
 #ifndef BIT_INFO_H
 #define BIT_INFO_H
 
+#include <algorithm>
 #include <concepts>
 #include <climits>
 #include <bitset>
@@ -10,15 +11,6 @@
 #include <mpi.h>
 
 static int bit_pair_count_calls = 0;
-
-extern "C" {
-	void shave_float(float *A, size_t n_elem, int n, float *shaved);
-	void shave_double(double *A, size_t n_elem, int n, double *shaved);
-	double preserved_information_float(float *A, float *B, size_t n_elem);
-	double preserved_information_double(double *A, double *B, size_t n_elem);
-	int pick_bits_to_shave_float(float *A, size_t n_elem, double tolerance, int nbits_old);
-	int pick_bits_to_shave_double(double *A, size_t n_elem, double tolerance, int nbits_old);
-}
 
 template<std::floating_point T>
 struct HELP {
@@ -156,15 +148,15 @@ void bit_count_entropy(T *A, size_t n_elem, double *H) {
 	}
 }
 
-/** @brief Shaves specified number of least significant bits from given bitset
+/** @brief shaves specified number of least significant bits from given bitset
  *
- *  @tparam N size of bitset
+ *  @tparam n size of bitset
  *  @param b pointer to bitset to shave
  *  @param n number of bits to shave
  */
-template <size_t N>
-void shave_bitset(std::bitset<N> *b, int n) {
-	std::bitset<N> mask = -1;	// all 1's
+template <size_t nbits>
+void shave_bitset(std::bitset<nbits> *b, int n) {
+	std::bitset<nbits> mask = -1;	// all 1's
 	mask <<= n;
 	*b &= mask;
 }
@@ -185,6 +177,94 @@ void shave_template(T *a, size_t n_elem, int n, T *shaved) {
 		std::memcpy(&b, &a[i], sizeof(T));
 		shave_bitset(&b, n);
 		std::memcpy(&shaved[i], &b, sizeof(T));
+	}
+}
+
+/** @brief replaces specified number of least significant bits from given bitset with 10000...
+ *
+ *  @tparam n size of bitset
+ *  @param b pointer to bitset to shave
+ *  @param n number of bits to shave
+ */
+template <size_t nbits>
+void halfshave_bitset(std::bitset<nbits> *b, int n) {
+	std::bitset<nbits> mask = -1;	// all 1's
+	mask <<= n;
+	*b &= mask;
+	mask >>= 1;
+	*b |= mask;
+}
+
+/**
+ * @brief half shaves (i.e. replaces with 100...) the least significant bits of each element in an array.
+ *
+ * @tparam T The type of the elements in the input array.
+ * @param a Pointer to the input array.
+ * @param n_elem The number of elements in the input array.
+ * @param n The number of least significant bits to clear.
+ * @param halfshaved Pointer to the output array to store the modified elements.
+ */
+template <typename T>
+void halfshave_template(T *a, size_t n_elem, int n, T *halfshaved) {
+	for (size_t i = 0; i < n_elem; i++) {
+		typename HELP<T>::type b;
+		std::memcpy(&b, &a[i], sizeof(T));
+		halfshave_bitset(&b, n);
+		std::memcpy(&halfshaved[i], &b, sizeof(T));
+	}
+}
+
+/** @brief sets specified number of least significant bits from given bitset to 1
+ *
+ *  @tparam n size of bitset
+ *  @param b pointer to bitset to set
+ *  @param n number of bits to set
+ */
+template <size_t nbits>
+void set_bitset(std::bitset<nbits> *b, int n) {
+	std::bitset<nbits> mask = -1;	// all 1's
+	mask <<= n;
+	*b |= ~mask;
+}
+
+/**
+ * @brief Clears the least significant bits of each element in an array.
+ *
+ * @tparam T The type of the elements in the input array.
+ * @param a Pointer to the input array.
+ * @param n_elem The number of elements in the input array.
+ * @param n The number of least significant bits to clear.
+ * @param set Pointer to the output array to store the modified elements.
+ */
+template <typename T>
+void set_template(T *a, size_t n_elem, int n, T *set) {
+	for (size_t i = 0; i < n_elem; i++) {
+		typename HELP<T>::type b;
+		std::memcpy(&b, &a[i], sizeof(T));
+		set_bitset(&b, n);
+		std::memcpy(&set[i], &b, sizeof(T));
+	}
+}
+
+/**
+ * @brief Clears the least significant bits of each element in an array.
+ *
+ * @tparam T The type of the elements in the input array.
+ * @param a Pointer to the input array.
+ * @param n_elem The number of elements in the input array.
+ * @param n The number of least significant bits to clear.
+ * @param groomed Pointer to the output array to store the modified elements.
+ */
+template <typename T>
+void groom_template(T *a, size_t n_elem, int n, T *groomed) {
+	for (size_t i = 0; i < n_elem; i++) {
+		typename HELP<T>::type b;
+		std::memcpy(&b, &a[i], sizeof(T));
+		if (i % 2 == 0)
+		  set_bitset(&b, n);
+		else
+		  shave_bitset(&b, n);
+		std::memcpy(&groomed[i], &b, sizeof(T));
 	}
 }
 
@@ -289,7 +369,6 @@ double preserved_information_template(T *A, T *B, size_t n_elem) {
 	for (int i = 0; i < n_bits; i++) {
 		P += R[i] * I[i] ;
 		total_information += I[i];
-		//std::cout << "P " << P << " total_information " << total_information << " R[" << i << "] " << R[i] << " I[" << i << "] " << I[i] << "\n";
 	}
 
     if (total_information == 0) {
@@ -325,7 +404,6 @@ int pick_bits_to_shave_template(T *A, size_t n_elem, double tolerance, int nbits
     	shave_template<T>(A, n_elem, i, s);
     	auto info = preserved_information_template<T>(A, s, n_elem);
     	if (info > tolerance) {
-    		//std::cout << "starting fresh bits shaved " << i << " info " << info << " tolerance " << tolerance << "\n";
     		return i;
     	}
     }
@@ -340,7 +418,6 @@ int pick_bits_to_shave_template(T *A, size_t n_elem, double tolerance, int nbits
       	shave_template<T>(A, n_elem, i, s);
       	auto info = preserved_information_template<T>(A, s, n_elem);
       	if (info > tolerance) {
-      		//std::cout << "decreasing bits shaved " << nbits - 1 - i << " info " << info << " tolerance " << tolerance << "\n";
       		return i;
       	}
       }
@@ -350,7 +427,6 @@ int pick_bits_to_shave_template(T *A, size_t n_elem, double tolerance, int nbits
       	shave_template<T>(A, n_elem, i, s);
       	auto info = preserved_information_template<T>(A, s, n_elem);
       	if (info <= tolerance) {
-      		//std::cout << "increasing bits shaved " << i - nbits - 1 << " info " << info << " tolerance " << tolerance << "\n";
       		return i-1; // XXX: Not sure if this should be i-1 or just i...
       	}
   	}
@@ -401,17 +477,14 @@ int binary_search(T *A, size_t n_elem, double tolerance, int start_bit, int high
    	auto info_low = preserved_information_template<T>(A, s_low, n_elem);
 	// Note: info_low is always >= info_high since we are shaving fewer bits
    	if (info_high < tolerance && info_low >= tolerance) {
-		//std::cout << "binary search bits shaved " << start_bit << " info high " << info_high << " info low " << info_low << " tolerance " << tolerance << "\n";
    		return start_bit-1;
    	} else if (info_low < tolerance) {
 		int new_start_bit = (start_bit - low_bit)/2 + low_bit;
 		if (new_start_bit == 0) return new_start_bit;
-		//std::cout << "binary search up bits shaved " << new_start_bit << " old bits shaved " << start_bit << " info high " << info_high << " info low " << info_low << " tolerance " << tolerance << "\n";
 		return binary_search<T>(A, n_elem, tolerance, new_start_bit, start_bit, low_bit);
 	} else if (info_high >= tolerance) {
 		int new_start_bit = (high_bit - start_bit)/2 + start_bit;
 		if (new_start_bit == start_bit) return new_start_bit;
-		//std::cout << "binary search down bits shaved " << new_start_bit << " old bits shaved " << start_bit << " info high " << info_high << " info low " << info_low << " tolerance " << tolerance << "\n";
 		return binary_search<T>(A, n_elem, tolerance, new_start_bit, high_bit, start_bit);
 	} else {
 		std::cout << "binary search error start bit " << start_bit << " old bits shaved " << start_bit << " info high " << info_high << " info low " << info_low << " tolerance " << tolerance << "\n";
@@ -433,9 +506,6 @@ template <typename T>
 int pick_bits_to_shave_binary_search_template(T *A, size_t n_elem, double tolerance, int nbits_old) {
   int max_shave_bits = get_max_shave_bits<T>();
 
-  //int rank;
-  //MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-  //std::cout << "rank " << rank << " calls to bit_pair_count " << bit_pair_count_calls << "\n";
   bit_pair_count_calls = 0;
   if (nbits_old == 0) {
 	return binary_search<T>(A, n_elem, tolerance, max_shave_bits/2, max_shave_bits, 0);
