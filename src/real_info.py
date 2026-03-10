@@ -1,4 +1,10 @@
 import ctypes
+import os
+import numpy as np
+
+# Load the compiled C library
+_lib_path = os.path.join(os.path.dirname(__file__), 'bit_info.so')
+real_info = ctypes.CDLL(_lib_path)
 
 def _infer_dtype(A):
     if hasattr(A, "dtype"):
@@ -54,7 +60,7 @@ def presereved_information(A, B, n_elem):
     else:
         raise ValueError(f"Unsupported dtype for preserved_information: {dtype_str}")
 
-def shave(A, n_elem, n, shaved):
+def shave(A, n_elem, n):
     dtype_str = _infer_dtype(A)
     if dtype_str == "float":
         shaved = np.zeros(n_elem, dtype=np.float32)
