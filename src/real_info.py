@@ -78,3 +78,22 @@ def shave(A, n_elem, n):
         return shaved
     else:
         raise ValueError(f"Unsupported dtype for shave: {dtype_str}")
+
+def bit_rounding(A, n_elem, n):
+    dtype_str = _infer_dtype(A)
+    if dtype_str == "float":
+        bit_rounding_result = np.zeros(n_elem, dtype=np.float32)
+        c_func = real_info.bit_rounding_float
+        c_func.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_size_t, ctypes.c_int, ctypes.POINTER(ctypes.c_float)]
+        c_func.restype = None
+        c_func(A.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), n_elem, n, bit_rounding_result.ctypes.data_as(ctypes.POINTER(ctypes.c_float)))
+        return bit_rounding_result
+    elif dtype_str == "double":
+        bit_rounding_result = np.zeros(n_elem, dtype=np.float64)
+        c_func = real_info.bit_rounding_double
+        c_func.argtypes = [ctypes.POINTER(ctypes.c_double), ctypes.c_size_t, ctypes.c_int, ctypes.POINTER(ctypes.c_double)]
+        c_func.restype = None
+        c_func(A.ctypes.data_as(ctypes.POINTER(ctypes.c_double)), n_elem, n, bit_rounding_result.ctypes.data_as(ctypes.POINTER(ctypes.c_double)))
+        return bit_rounding_result
+    else:
+        raise ValueError(f"Unsupported dtype for bit_rounding: {dtype_str}")

@@ -22,6 +22,22 @@ static int n_exponent_bits_double = 11;
 static int n_joint_counts = 4;
 static int n_counts = 2;
 
+/** 
+ *  @brief Gets the number of exponent bits for a given bit size following IEEE 754 standard.
+ *  @param nbits The bit size.
+ *  @return The number of exponent bits.
+ */
+inline int get_n_exponent_bits(int nbits) {
+	if (nbits == 32) {
+		return 23;
+	} else if (nbits == 64) {
+		return 52;
+	} else {
+		std::cerr << "Unsupported bit size: " << nbits << "\n";
+		return 0;
+	}
+}
+
 // XXX: temporarily dump these helper functions here
 /* Counts the number of bits set to 1 in position i */
 template <typename T>
@@ -211,6 +227,63 @@ void halfshave_template(T *a, size_t n_elem, int n, T *halfshaved) {
 		std::memcpy(&b, &a[i], sizeof(T));
 		halfshave_bitset(&b, n);
 		std::memcpy(&halfshaved[i], &b, sizeof(T));
+	}
+}
+
+/**
+ *  @brief Rounds the least significant bits of a bitset to the specified number of bits.
+ *         Does this by creating an upper and lower mask to isolate the nth bit as a bitset
+ *		   then adds it to the original bitset that had n-1 least significant bits cleared. This is a hacky way to do rounding since we can't do math operations with bitsets, but it works.
+ *
+ *  @tparam n size of bitset
+ *  @param b pointer to bitset to round
+ *  @param n number of bits to round to
+ */
+template <size_t nbits>
+void round_bitset(std::bitset<nbits> *b, int n){
+	int mantissa_bits = nbits - get_n_exponent_bits(nbits) - 1;
+	std::bitset<nbits> mask = -1;	// all 1's
+	std::bitset<nbits> lower_mask = mask << n;
+	std::bitset<nbits> upper_mask = mask >> (nbits - n + 1);
+	int keepbits = mantissa_bits - n;
+	int shift = mantissa_bits - keepbits - 1;
+	shift -= (keepbits == mantissa_bits) ? 1 : 0;
+
+	if (nbits == 32) {
+		std::uint32_t temp_b, upper_mask_uint;
+		std::memcpy(&temp_b, b, sizeof(std::uint32_t));
+		std::memcpy(&upper_mask_uint, &upper_mask, sizeof(std::uint32_t));
+		temp_b += upper_mask_uint + ((temp_b >> shift) & 1);
+		std::memcpy(b, &temp_b, sizeof(std::uint32_t));
+		*b &= lower_mask;
+	} else if (nbits == 64) {
+		std::uint64_t temp_b, upper_mask_uint;
+		std::memcpy(&temp_b, b, sizeof(std::uint64_t));
+		std::memcpy(&upper_mask_uint, &upper_mask, sizeof(std::uint64_t));
+		temp_b += upper_mask_uint + ((temp_b >> shift) & 1);
+		std::memcpy(b, &temp_b, sizeof(std::uint64_t));
+		*b &= lower_mask;
+	} else {
+		std::cerr << "Unsupported bit size: " << nbits << "\n";
+	}
+}
+
+/**
+ * @brief Performs bit rounding to the specified number of bits.
+ *
+ * @tparam T The type of the elements in the input array.
+ * @param a Pointer to the input array.
+ * @param n_elem The number of elements in the input array.
+ * @param n The number of least significant bits to clear.
+ * @param bit_rounding_result Pointer to the output array to store the modified elements.
+ */
+template <typename T>
+void bit_rounding_template(T *a, size_t n_elem, int n, T *bit_rounding_result) {
+	for (size_t i = 0; i < n_elem; i++) {
+		typename HELP<T>::type b;
+		std::memcpy(&b, &a[i], sizeof(T));
+		round_bitset(&b, n);
+		std::memcpy(&bit_rounding_result[i], &b, sizeof(T));
 	}
 }
 
@@ -471,8 +544,10 @@ template <typename T>
 int binary_search(T *A, size_t n_elem, double tolerance, int start_bit, int high_bit, int low_bit) {
 	T s_high[n_elem];
 	T s_low[n_elem];
-   	shave_template<T>(A, n_elem, start_bit, s_high);
-	shave_template<T>(A, n_elem, start_bit-1, s_low);
+    shave_template<T>(A, n_elem, start_bit, s_high);
+    shave_template<T>(A, n_elem, start_bit-1, s_low);
+    //bit_rounding_template<T>(A, n_elem, start_bit, s_high);
+    //bit_rounding_template<T>(A, n_elem, start_bit-1, s_low);
    	auto info_high = preserved_information_template<T>(A, s_high, n_elem);
    	auto info_low = preserved_information_template<T>(A, s_low, n_elem);
 	// Note: info_low is always >= info_high since we are shaving fewer bits

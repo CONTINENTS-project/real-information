@@ -29,6 +29,18 @@ extern "C" {
 }
 
 extern "C" {
+	void bit_rounding_float(float *A, size_t n_elem, int n, float *bit_rounding_result) {
+		bit_rounding_template<float>(A, n_elem, n, bit_rounding_result);
+	}
+}
+
+extern "C" {
+	void bit_rounding_double(double *A, size_t n_elem, int n, double *bit_rounding_result) {
+		bit_rounding_template<double>(A, n_elem, n, bit_rounding_result);
+	}
+}
+
+extern "C" {
 	void set_float(float *A, size_t n_elem, int n, float *set) {
 		set_template<float>(A, n_elem, n, set);
 	}
