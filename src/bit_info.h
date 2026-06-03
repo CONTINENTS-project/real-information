@@ -10,6 +10,134 @@
 #include <cstring>
 #include <mpi.h>
 
+inline int get_n_exponent_bits(int nbits);
+
+template<typename T>
+class bits{
+	public:
+		uint32_t bit_set_32;
+		uint64_t bit_set_64;
+
+		bits(T x) {
+			if (std::is_same_v<T, float>) {
+				std::memcpy(&bit_set_32, &x, sizeof(float));
+			} else if (std::is_same_v<T, double>) {
+				std::memcpy(&bit_set_64, &x, sizeof(double));
+			}
+		}
+
+		T convert_back() {
+			T result;
+			if (std::is_same_v<T, float>) {
+				std::memcpy(&result, &bit_set_32, sizeof(float));
+			} else if (std::is_same_v<T, double>) {
+				std::memcpy(&result, &bit_set_64, sizeof(double));
+			}
+			return result;
+		}
+
+		void shave(int n) {
+			if (std::is_same_v<T, float>) {
+				uint32_t mask = 0xFFFFFFFF << n;
+				bit_set_32 &= mask;
+			} else if (std::is_same_v<T, double>) {
+				uint64_t mask = 0xFFFFFFFFFFFFFFFF << n;
+				bit_set_64 &= mask;
+			}
+		}
+
+		void set(int n) {
+			if (std::is_same_v<T, float>) {
+				uint32_t mask = 0xFFFFFFFF << n;
+				bit_set_32 |= ~mask;
+			} else if (std::is_same_v<T, double>) {
+				uint64_t mask = 0xFFFFFFFFFFFFFFFF << n;
+				bit_set_64 |= ~mask;
+			}
+		}
+
+		void halfshave(int n) {
+			if (std::is_same_v<T, float>) {
+				uint32_t mask = 0xFFFFFFFF << n;
+				bit_set_32 &= mask;
+				mask >>= 1;
+				bit_set_32 |= mask;
+			} else if (std::is_same_v<T, double>) {
+				uint64_t mask = 0xFFFFFFFFFFFFFFFF << n;
+				bit_set_64 &= mask;
+				mask >>= 1;
+				bit_set_64 |= mask;
+			}
+		}
+
+		void round(int n) {
+			int nbits = sizeof(T) * CHAR_BIT;
+			int mantissa_bits = nbits - get_n_exponent_bits(nbits) - 1;
+			int keepbits = mantissa_bits - n;
+			int shift = mantissa_bits - keepbits - 1;
+			shift -= (keepbits == mantissa_bits) ? 1 : 0;
+
+			if (std::is_same_v<T, float>) {
+				uint32_t upper_mask;
+				if (nbits - n + 1 >= 32) {
+					upper_mask = 0x00000000; // bitshift leads to undefined behaviour if greater than number of bits, and what we really want are all zeros
+				} else {
+				 	upper_mask = 0xffffffff >> (nbits - n + 1);
+				}
+				uint32_t lower_mask = 0xFFFFFFFF << n;
+				uint32_t temp_bit_set_32 = bit_set_32 + upper_mask + ((bit_set_32 >> shift) & 1);
+				bit_set_32 = temp_bit_set_32 & lower_mask;
+			} else if (std::is_same_v<T, double>) {
+				uint32_t upper_mask;
+				if (nbits - n + 1 >= 64) {
+					upper_mask = 0x0000000000000000; // bitshift leads to undefined behaviour if greater than number of bits, and what we really want are all zeros
+				} else {
+				 	upper_mask = 0xFFFFFFFFFFFFFFFF >> (nbits - n + 1);
+				}
+				uint64_t lower_mask = 0xFFFFFFFFFFFFFFFF << n;
+				uint64_t temp_bit_set_64 = bit_set_64 + upper_mask + ((bit_set_64 >> shift) & 1);
+				bit_set_64 = temp_bit_set_64 & lower_mask;
+			}
+		}
+
+};
+
+template <typename T>
+void shave_bits(T *A, size_t n_elem, int n, T *shaved) {
+	for (size_t i = 0; i < n_elem; i++) {
+		bits<T> b(A[i]);
+		b.shave(n);
+		shaved[i] = b.convert_back();
+	}
+}
+
+template <typename T>
+void halfshave_bits(T *A, size_t n_elem, int n, T *halfshaved) {
+	for (size_t i = 0; i < n_elem; i++) {
+		bits<T> b(A[i]);
+		b.halfshave(n);
+		halfshaved[i] = b.convert_back();
+	}
+}
+
+template <typename T>
+void bit_rounding_bits(T *A, size_t n_elem, int n, T *bit_rounding_result) {
+	for (size_t i = 0; i < n_elem; i++) {
+		bits<T> b(A[i]);
+		b.round(n);
+		bit_rounding_result[i] = b.convert_back();
+	}
+}
+
+template <typename T>
+void set_bits(T *A, size_t n_elem, int n, T *set) {
+	for (size_t i = 0; i < n_elem; i++) {
+		bits<T> b(A[i]);
+		b.set(n);
+		set[i] = b.convert_back();
+	}
+}
+
 static int bit_pair_count_calls = 0;
 
 template<std::floating_point T>
@@ -97,6 +225,52 @@ double bitpattern_entropy(T *A, size_t n_elem) {
   H += -p * std::log2(p);
   delete[] A_sorted;
   return H;
+}
+
+template <typename T>
+void bit_pair_count_bits(bits<T> a, bits<T> b, int j, int *p) {
+	int bit_a, bit_b;
+
+	if (std::is_same_v<T, float>) {
+		uint32_t mask = 0x00000001;
+		mask <<= j;
+		bit_a = (a.bit_set_32 & mask) ? 1 : 0;
+		bit_b = (b.bit_set_32 & mask) ? 1 : 0;
+	} else if (std::is_same_v<T, double>) {
+		uint64_t mask = 0x0000000000000001;
+		mask <<= j;
+		bit_a = (a.bit_set_64 & mask) ? 1 : 0;
+		bit_b = (b.bit_set_64 & mask) ? 1 : 0;
+	}
+
+	for (int i = 0; i < 4; i++) p[i] = 0;
+	if (bit_a == 0 && bit_b == 0) {
+		p[0] = 1;
+	} else if (bit_a == 0 && bit_b == 1) {
+		p[1] = 1;
+	} else if (bit_a == 1 && bit_b == 0) {
+		p[2] = 1;
+	} else if (bit_a == 1 && bit_b == 1) {
+		p[3] = 1;
+	}
+}
+
+template <typename T>
+void bit_pair_count_bits(T *A, T *B, size_t n_elem, size_t *pair_counts) {
+	bit_pair_count_calls += 1;
+	const int n_bits = sizeof(T) * CHAR_BIT;
+	for (size_t i = 0; i < n_elem; i++) {
+		bits<T> a(A[i]);
+		bits<T> b(B[i]);
+		int pair_count[4];
+		for (int j = 0; j < n_bits; j++) {
+			bit_pair_count_bits(a, b, j, pair_count);
+			pair_counts[j * n_joint_counts] += pair_count[0];
+			pair_counts[j * n_joint_counts + 1] += pair_count[1];
+			pair_counts[j * n_joint_counts + 2] += pair_count[2];
+			pair_counts[j * n_joint_counts + 3] += pair_count[3];
+		}
+	}
 }
 
 /* Helper function to compute pair counts at a particular position in 
