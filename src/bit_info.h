@@ -57,16 +57,17 @@ class bits{
 		}
 
 		void halfshave(int n) {
+			int nbits = sizeof(T) * CHAR_BIT;
 			if (std::is_same_v<T, float>) {
-				uint32_t mask = 0xFFFFFFFF << n;
-				bit_set_32 &= mask;
-				mask >>= 1;
-				bit_set_32 |= mask;
+				uint32_t keep_mask = 0xFFFFFFFF << n;
+				bit_set_32 &= keep_mask;
+				uint32_t round_up_mask = 0x80000000 >> (nbits - n - 1);
+				bit_set_32 |= round_up_mask;
 			} else if (std::is_same_v<T, double>) {
-				uint64_t mask = 0xFFFFFFFFFFFFFFFF << n;
-				bit_set_64 &= mask;
-				mask >>= 1;
-				bit_set_64 |= mask;
+				uint64_t keep_mask = 0xFFFFFFFFFFFFFFFF << n;
+				bit_set_64 &= keep_mask;
+				uint64_t round_up_mask = 0x8000000000000000 >> (nbits - n - 1);
+				bit_set_64 |= round_up_mask;
 			}
 		}
 
@@ -88,7 +89,7 @@ class bits{
 				uint32_t temp_bit_set_32 = bit_set_32 + upper_mask + ((bit_set_32 >> shift) & 1);
 				bit_set_32 = temp_bit_set_32 & lower_mask;
 			} else if (std::is_same_v<T, double>) {
-				uint32_t upper_mask;
+				uint64_t upper_mask;
 				if (nbits - n + 1 >= 64) {
 					upper_mask = 0x0000000000000000; // bitshift leads to undefined behaviour if greater than number of bits, and what we really want are all zeros
 				} else {
@@ -378,11 +379,12 @@ void shave_template(T *a, size_t n_elem, int n, T *shaved) {
  */
 template <size_t nbits>
 void halfshave_bitset(std::bitset<nbits> *b, int n) {
-	std::bitset<nbits> mask = -1;	// all 1's
-	mask <<= n;
-	*b &= mask;
-	mask >>= 1;
-	*b |= mask;
+	std::bitset<nbits> keep_mask = -1;	// all 1's
+	keep_mask <<= n;
+	*b &= keep_mask;
+	std::bitset<nbits> round_up_mask = 0x80000000;
+	round_up_mask >>= (nbits - n - 1);
+	*b |= round_up_mask;
 }
 
 /**
