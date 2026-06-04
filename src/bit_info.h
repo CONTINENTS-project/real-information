@@ -13,11 +13,23 @@
 inline int get_n_exponent_bits(int nbits);
 
 template<typename T>
+/**
+ * @brief Utility wrapper for bit-level operations on floating-point values.
+ *
+ * The class stores the raw IEEE-754 bit pattern of a float or double and
+ * exposes helpers to shave, set, halfshave, and round least-significant bits.
+ *
+ * @tparam T Floating-point type (`float` or `double`).
+ */
 class bits{
 	public:
 		uint32_t bit_set_32;
 		uint64_t bit_set_64;
 
+		/**
+		 * @brief Construct from a floating-point value by copying its bit pattern.
+		 * @param x Input value.
+		 */
 		bits(T x) {
 			if (std::is_same_v<T, float>) {
 				std::memcpy(&bit_set_32, &x, sizeof(float));
@@ -26,6 +38,10 @@ class bits{
 			}
 		}
 
+		/**
+		 * @brief Reconstruct the floating-point value from the stored bits.
+		 * @return Value of type `T` represented by the current bit pattern.
+		 */
 		T convert_back() {
 			T result;
 			if (std::is_same_v<T, float>) {
@@ -36,6 +52,10 @@ class bits{
 			return result;
 		}
 
+		/**
+		 * @brief Shave the lowest `n` bits.
+		 * @param n Number of least-significant bits to shave.
+		 */
 		void shave(int n) {
 			if (std::is_same_v<T, float>) {
 				uint32_t mask = 0xFFFFFFFF << n;
@@ -46,6 +66,10 @@ class bits{
 			}
 		}
 
+		/**
+		 * @brief Set the lowest `n` bits to 1.
+		 * @param n Number of least-significant bits to set.
+		 */
 		void set(int n) {
 			if (std::is_same_v<T, float>) {
 				uint32_t mask = 0xFFFFFFFF << n;
@@ -56,6 +80,10 @@ class bits{
 			}
 		}
 
+		/**
+		 * @brief Shave the lowest `n` bits and set the highest cleared bit.
+		 * @param n Number of least-significant bits to modify.
+		 */
 		void halfshave(int n) {
 			int nbits = sizeof(T) * CHAR_BIT;
 			if (std::is_same_v<T, float>) {
@@ -71,6 +99,10 @@ class bits{
 			}
 		}
 
+		/**
+		 * @brief Bitwise round the `n` least-significant bits
+		 * @param n Number of least-significant bits to round away.
+		 */
 		void round(int n) {
 			int nbits = sizeof(T) * CHAR_BIT;
 			int mantissa_bits = nbits - get_n_exponent_bits(nbits) - 1;
@@ -103,6 +135,13 @@ class bits{
 
 };
 
+/** 
+ * @brief Shave the lowest `n` bits from each element in an array.
+ * @param A Input array of type `T`.
+ * @param n_elem Number of elements in the array.
+ * @param n Number of least-significant bits to shave.
+ * @param shaved Output array of shaved values.
+ */
 template <typename T>
 void shave_bits(T *A, size_t n_elem, int n, T *shaved) {
 	for (size_t i = 0; i < n_elem; i++) {
@@ -112,6 +151,13 @@ void shave_bits(T *A, size_t n_elem, int n, T *shaved) {
 	}
 }
 
+/** 
+ * @brief Half-shave the lowest `n` bits from each element in an array.
+ * @param A Input array of type `T`.
+ * @param n_elem Number of elements in the array.
+ * @param n Number of least-significant bits to half-shave.
+ * @param halfshaved Output array of half-shaved values.
+ */
 template <typename T>
 void halfshave_bits(T *A, size_t n_elem, int n, T *halfshaved) {
 	for (size_t i = 0; i < n_elem; i++) {
@@ -121,6 +167,13 @@ void halfshave_bits(T *A, size_t n_elem, int n, T *halfshaved) {
 	}
 }
 
+/** 
+ * @brief Bitwise round the `n` least-significant bits from each element in an array.
+ * @param A Input array of type `T`.
+ * @param n_elem Number of elements in the array.
+ * @param n Number of least-significant bits to round.
+ * @param bit_rounding_result Output array of rounded values.
+ */
 template <typename T>
 void bit_rounding_bits(T *A, size_t n_elem, int n, T *bit_rounding_result) {
 	for (size_t i = 0; i < n_elem; i++) {
@@ -130,6 +183,13 @@ void bit_rounding_bits(T *A, size_t n_elem, int n, T *bit_rounding_result) {
 	}
 }
 
+/** 
+ * @brief Set the lowest `n` bits for each element in an array.
+ * @param A Input array of type `T`.
+ * @param n_elem Number of elements in the array.
+ * @param n Number of least-significant bits to set.
+ * @param set Output array of set values.
+ */
 template <typename T>
 void set_bits(T *A, size_t n_elem, int n, T *set) {
 	for (size_t i = 0; i < n_elem; i++) {
@@ -168,7 +228,12 @@ inline int get_n_exponent_bits(int nbits) {
 }
 
 // XXX: temporarily dump these helper functions here
-/* Counts the number of bits set to 1 in position i */
+/**
+ * @brief Counts the number of bits set to 1 in a specific bit position across an array.
+ * @param A Input array of type `T`.
+ * @param n_elem Number of elements in the array.
+ * @param i Bit position to count (0 for least significant bit).
+ */
 template <typename T>
 size_t bit_count(T *A, size_t n_elem, int i) {
 	size_t count = 0;
@@ -181,7 +246,12 @@ size_t bit_count(T *A, size_t n_elem, int i) {
 	return count;
 }
 
-/* Counts number of bits set to 1 in each position */
+/**
+ * @brief Counts the number of bits set to 1 in each bit position across an array.
+ * @param A Input array of type `T`.
+ * @param n_elem Number of elements in the array.
+ * @param c Output array to store the count of bits set to 1 for each bit position.
+ */
 template <typename T>
 void bit_count(T *A, size_t n_elem, size_t *c) {
 	int n_bits = sizeof(A[0]) * CHAR_BIT;
@@ -190,7 +260,12 @@ void bit_count(T *A, size_t n_elem, size_t *c) {
 	}
 }
 
-/* Computes Shannon entropy for an array of probabilities, A */
+/**
+ * @brief Computes the Shannon entropy of a probability distribution.
+ * @param A Input array of probabilities (must sum to 1).
+ * @param n_elem Number of elements in the array.
+ * @return The Shannon entropy of the distribution represented by A.
+ */
 double entropy(double *A, size_t n_elem) {
 	double H = 0;
 
@@ -203,6 +278,12 @@ double entropy(double *A, size_t n_elem) {
 	return H;
 }
 
+/** 
+ * @brief Computes the entropy of a bit pattern distribution.
+ * @param A Input array of type `T`.
+ * @param n_elem Number of elements in the array.
+ * @return The entropy of the bit pattern distribution.
+ */
 template <typename T>
 double bitpattern_entropy(T *A, size_t n_elem) {
   double p;
@@ -228,6 +309,13 @@ double bitpattern_entropy(T *A, size_t n_elem) {
   return H;
 }
 
+/**
+ * @brief Helper function to compute pair counts at a particular position in two numbers represented as bits.
+ * @param a First number represented as bits.
+ * @param b Second number represented as bits.
+ * @param j Bit position to compare.
+ * @param p Output array to store the counts of each bit pair.
+ */
 template <typename T>
 void bit_pair_count_bits(bits<T> a, bits<T> b, int j, int *p) {
 	int bit_a, bit_b;
@@ -256,6 +344,13 @@ void bit_pair_count_bits(bits<T> a, bits<T> b, int j, int *p) {
 	}
 }
 
+/**
+ * @brief Counts the occurrences of bit pairs (00, 01, 10, 11) between two arrays.
+ * @param A Pointer to the first array.	
+ * @param B Pointer to the second array.
+ * @param n_elem The number of elements in the arrays A and B.
+ * @param pair_counts Pointer to an array to store the counts of each bit pair.
+ */
 template <typename T>
 void bit_pair_count_bits(T *A, T *B, size_t n_elem, size_t *pair_counts) {
 	bit_pair_count_calls += 1;
@@ -274,8 +369,13 @@ void bit_pair_count_bits(T *A, T *B, size_t n_elem, size_t *pair_counts) {
 	}
 }
 
-/* Helper function to compute pair counts at a particular position in 
-   two numbers represented as bitsets. */
+/**
+ * @brief Helper function to compute pair counts at a particular position in two numbers represented as bitsets.
+ * @param a First number represented as a bitset.
+ * @param b Second number represented as a bitset.
+ * @param j Bit position to compare.
+ * @param p Output array to store the counts of each bit pair.
+ */
 template <int n_bits>
 void bit_pair_count(std::bitset<n_bits> a, std::bitset<n_bits> b, int j, int *p) {
 	for (int i = 0; i < 4; i++) p[i] = 0;
