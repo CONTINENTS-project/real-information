@@ -247,6 +247,32 @@ size_t bit_count(T *A, size_t n_elem, int i) {
 }
 
 /**
+ * @brief Counts the number of bits set to 1 in a specific bit position across an array using the `bits` class.
+ * @param A Input array of type `T`.
+ * @param n_elem Number of elements in the array.
+ * @param i Bit position to count (0 for least significant bit).
+ * @return The count of bits set to 1 in the specified bit position across the array.
+ */
+template <typename T>
+size_t bit_count_bits(T *A, size_t n_elem, int i) {
+	size_t count = 0;
+	for (size_t j = 0; j < n_elem; j++) {
+		bits<T> b(A[j]);
+		if (std::is_same_v<T, float>) {
+			uint32_t mask = 0x00000001;
+			mask <<= i;
+			count += (b.bit_set_32 & mask) ? 1 : 0;
+		} else if (std::is_same_v<T, double>) {
+			uint64_t mask = 0x0000000000000001;
+			mask <<= i;
+			count += (b.bit_set_64 & mask) ? 1 : 0;
+		}
+	}
+
+	return count;
+}
+
+/**
  * @brief Counts the number of bits set to 1 in each bit position across an array.
  * @param A Input array of type `T`.
  * @param n_elem Number of elements in the array.
@@ -257,6 +283,14 @@ void bit_count(T *A, size_t n_elem, size_t *c) {
 	int n_bits = sizeof(A[0]) * CHAR_BIT;
 	for (int i = 0; i < n_bits; i++) {
 		c[i] = bit_count(A, n_elem, i);
+	}
+}
+template <typename T>
+void bit_count_bits(T *A, size_t n_elem, size_t *c) {
+	int n_bits = sizeof(A[0]) * CHAR_BIT;
+	for (int i = 0; i < n_bits; i++) {
+		//c[i] = bit_count(A, n_elem, i);
+		c[i] = bit_count_bits(A, n_elem, i);
 	}
 }
 
@@ -631,7 +665,8 @@ void mutual_information(T *A, T *B, size_t n_elem, double *info) {
 	const int n_bits = sizeof(A[0]) * CHAR_BIT;
 	size_t pair_counts[n_joint_counts * n_bits];
 	for (size_t i = 0; i < n_joint_counts * n_bits; i++) pair_counts[i] = 0;
-	bit_pair_count(A, B, n_elem, pair_counts);
+	bit_pair_count_bits(A, B, n_elem, pair_counts);
+	//bit_pair_count(A, B, n_elem, pair_counts);
 
 	for (int i = 0; i < n_bits; i++) {
 		info[i] = 0;
