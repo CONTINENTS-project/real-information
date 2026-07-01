@@ -289,7 +289,6 @@ template <typename T>
 void bit_count_bits(T *A, size_t n_elem, size_t *c) {
 	int n_bits = sizeof(A[0]) * CHAR_BIT;
 	for (int i = 0; i < n_bits; i++) {
-		//c[i] = bit_count(A, n_elem, i);
 		c[i] = bit_count_bits(A, n_elem, i);
 	}
 }
@@ -389,6 +388,7 @@ template <typename T>
 void bit_pair_count_bits(T *A, T *B, size_t n_elem, size_t *pair_counts) {
 	bit_pair_count_calls += 1;
 	const int n_bits = sizeof(T) * CHAR_BIT;
+	#pragma omp parallel for reduction(+:pair_counts[:n_bits * n_joint_counts])
 	for (size_t i = 0; i < n_elem; i++) {
 		bits<T> a(A[i]);
 		bits<T> b(B[i]);
@@ -465,6 +465,7 @@ void bit_count_entropy(T *A, size_t n_elem, double *H) {
 	const int n_bits = sizeof(A[0]) * CHAR_BIT;
 	size_t c[n_bits];
 	bit_count(A, n_elem, c);
+	//bit_count_bits(A, n_elem, c); // bits class implementation
 
 	for (int i = 0; i < n_bits; i++) {
 		double p = static_cast<double>(c[i])/static_cast<double>(n_elem);
@@ -665,8 +666,8 @@ void mutual_information(T *A, T *B, size_t n_elem, double *info) {
 	const int n_bits = sizeof(A[0]) * CHAR_BIT;
 	size_t pair_counts[n_joint_counts * n_bits];
 	for (size_t i = 0; i < n_joint_counts * n_bits; i++) pair_counts[i] = 0;
-	bit_pair_count_bits(A, B, n_elem, pair_counts);
-	//bit_pair_count(A, B, n_elem, pair_counts);
+	//bit_pair_count_bits(A, B, n_elem, pair_counts); // bits class implementation
+	bit_pair_count(A, B, n_elem, pair_counts);
 
 	for (int i = 0; i < n_bits; i++) {
 		info[i] = 0;
@@ -786,6 +787,7 @@ int pick_bits_to_shave_template(T *A, size_t n_elem, double tolerance, int nbits
     /* Start with shaving more bits rather than less */
     for (int i = start_bit; i >= 0; i--) {
     	shave_template<T>(A, n_elem, i, s);
+    	//shave_bits<T>(A, n_elem, i, s); // bits class implementation
     	auto info = preserved_information_template<T>(A, s, n_elem);
     	if (info > tolerance) {
     		return i;
@@ -796,10 +798,12 @@ int pick_bits_to_shave_template(T *A, size_t n_elem, double tolerance, int nbits
     	
     /* Check if we should retain more bits first */
     shave_template<T>(A, n_elem, nbits, s);
+    //shave_bits<T>(A, n_elem, nbits, s); // bits class implementation
     auto info = preserved_information_template<T>(A, s, n_elem);
     if (info <= tolerance) {
       for (int i = nbits - 1; i >= 0; i--) {
       	shave_template<T>(A, n_elem, i, s);
+      	//shave_bits<T>(A, n_elem, i, s); // bits class implementation
       	auto info = preserved_information_template<T>(A, s, n_elem);
       	if (info > tolerance) {
       		return i;
@@ -808,7 +812,8 @@ int pick_bits_to_shave_template(T *A, size_t n_elem, double tolerance, int nbits
     } else {
   	/* Maybe we aren't throwing out enough. Increase number of bits thrown out */
   	for (int i = nbits + 1; i < max_bits; i++) {
-      	shave_template<T>(A, n_elem, i, s);
+      	//shave_template<T>(A, n_elem, i, s);
+      	shave_bits<T>(A, n_elem, i, s);
       	auto info = preserved_information_template<T>(A, s, n_elem);
       	if (info <= tolerance) {
       		return i-1; // XXX: Not sure if this should be i-1 or just i...
@@ -857,6 +862,8 @@ int binary_search(T *A, size_t n_elem, double tolerance, int start_bit, int high
 	T s_low[n_elem];
     shave_template<T>(A, n_elem, start_bit, s_high);
     shave_template<T>(A, n_elem, start_bit-1, s_low);
+    //shave_bits<T>(A, n_elem, start_bit, s_high);  // bits class implementation
+    //shave_bits<T>(A, n_elem, start_bit-1, s_low); // bits class implementation
     //bit_rounding_template<T>(A, n_elem, start_bit, s_high);
     //bit_rounding_template<T>(A, n_elem, start_bit-1, s_low);
    	auto info_high = preserved_information_template<T>(A, s_high, n_elem);
