@@ -11,6 +11,20 @@
 #include <mpi.h>
 
 inline int get_n_exponent_bits(int nbits);
+const bool mantissa_only = false;
+
+void get_start_end_bits(int n_bits, int *start, int *end) {
+	if (mantissa_only) {
+		if (n_bits == 32) {
+			*start = 9;
+		} else if (n_bits == 64) {
+			*start = 11;
+		}
+	} else {
+		*start = 0;
+	}
+	*end = n_bits;
+}
 
 template<typename T>
 /**
@@ -281,15 +295,19 @@ size_t bit_count_bits(T *A, size_t n_elem, int i) {
 template <typename T>
 void bit_count(T *A, size_t n_elem, size_t *c) {
 	int n_bits = sizeof(A[0]) * CHAR_BIT;
-	for (int i = 0; i < n_bits; i++) {
-		c[i] = bit_count(A, n_elem, i);
+	int start_bit, end_bit;
+	get_start_end_bits(n_bits, &start_bit, &end_bit);
+	for (int i = start_bit; i < end_bit; i++) {
+		c[i - start_bit] = bit_count(A, n_elem, i);
 	}
 }
 template <typename T>
 void bit_count_bits(T *A, size_t n_elem, size_t *c) {
 	int n_bits = sizeof(A[0]) * CHAR_BIT;
-	for (int i = 0; i < n_bits; i++) {
-		c[i] = bit_count_bits(A, n_elem, i);
+	int start_bit, end_bit;
+	get_start_end_bits(n_bits, &start_bit, &end_bit);
+	for (int i = start_bit; i < end_bit; i++) {
+		c[i - start_bit] = bit_count_bits(A, n_elem, i);
 	}
 }
 
@@ -388,17 +406,20 @@ template <typename T>
 void bit_pair_count_bits(T *A, T *B, size_t n_elem, size_t *pair_counts) {
 	bit_pair_count_calls += 1;
 	const int n_bits = sizeof(T) * CHAR_BIT;
-	#pragma omp parallel for reduction(+:pair_counts[:n_bits * n_joint_counts])
+	int start_bit, end_bit;
+	get_start_end_bits(n_bits, &start_bit, &end_bit);
+	int total_bits = end_bit - start_bit;
+	#pragma omp parallel for reduction(+:pair_counts[:total_bits * n_joint_counts])
 	for (size_t i = 0; i < n_elem; i++) {
 		bits<T> a(A[i]);
 		bits<T> b(B[i]);
 		int pair_count[4];
-		for (int j = 0; j < n_bits; j++) {
+		for (int j = start_bit; j < end_bit; i++) {
 			bit_pair_count_bits(a, b, j, pair_count);
-			pair_counts[j * n_joint_counts] += pair_count[0];
-			pair_counts[j * n_joint_counts + 1] += pair_count[1];
-			pair_counts[j * n_joint_counts + 2] += pair_count[2];
-			pair_counts[j * n_joint_counts + 3] += pair_count[3];
+			pair_counts[(j - start_bit) * n_joint_counts] += pair_count[0];
+			pair_counts[(j - start_bit) * n_joint_counts + 1] += pair_count[1];
+			pair_counts[(j - start_bit) * n_joint_counts + 2] += pair_count[2];
+			pair_counts[(j - start_bit) * n_joint_counts + 3] += pair_count[3];
 		}
 	}
 }
@@ -463,14 +484,17 @@ void bit_pair_count(T *A, T *B, size_t n_elem, size_t *pair_counts) {
 template <typename T>
 void bit_count_entropy(T *A, size_t n_elem, double *H) {
 	const int n_bits = sizeof(A[0]) * CHAR_BIT;
-	size_t c[n_bits];
+	int start_bit, end_bit;
+	get_start_end_bits(n_bits, &start_bit, &end_bit);
+	int total_bits = end_bit - start_bit;
+	size_t c[total_bits];
 	bit_count(A, n_elem, c);
 	//bit_count_bits(A, n_elem, c); // bits class implementation
 
-	for (int i = 0; i < n_bits; i++) {
-		double p = static_cast<double>(c[i])/static_cast<double>(n_elem);
+	for (int i = start_bit; i < end_bit; i++) {
+		double p = static_cast<double>(c[i - start_bit])/static_cast<double>(n_elem);
 		double p_array[2] = {p, 1 - p};
-		H[i] = entropy(p_array, 2);
+		H[i - start_bit] = entropy(p_array, 2);
 	}
 }
 
@@ -664,12 +688,16 @@ void groom_template(T *a, size_t n_elem, int n, T *groomed) {
 template <typename T>
 void mutual_information(T *A, T *B, size_t n_elem, double *info) {
 	const int n_bits = sizeof(A[0]) * CHAR_BIT;
-	size_t pair_counts[n_joint_counts * n_bits];
-	for (size_t i = 0; i < n_joint_counts * n_bits; i++) pair_counts[i] = 0;
+	int start_bit, end_bit;
+	get_start_end_bits(n_bits, &start_bit, &end_bit);
+	int total_bits = end_bit - start_bit;
+
+	size_t pair_counts[n_joint_counts * total_bits];
+	for (size_t i = 0; i < n_joint_counts * total_bits; i++) pair_counts[i] = 0;
 	//bit_pair_count_bits(A, B, n_elem, pair_counts); // bits class implementation
 	bit_pair_count(A, B, n_elem, pair_counts);
 
-	for (int i = 0; i < n_bits; i++) {
+	for (int i = 0; i < total_bits; i++) {
 		info[i] = 0;
 		for (int r = 0; r < 2; r++) {
 			double p_r = static_cast<double>(pair_counts[i * n_joint_counts + r * n_counts] + pair_counts[i * n_joint_counts + r * n_counts + 1]) / static_cast<double>(n_elem);
@@ -713,15 +741,18 @@ void bitwise_real_information(T *A, size_t n_elem, double *info) {
 template <typename T>
 void redundancy(T *A, T *B, size_t n_elem, double *R) {
 	const int n_bits = sizeof(A[0]) * CHAR_BIT;
-	double *M = new double[n_bits];
-	double *HA = new double[n_bits];
-	double *HB = new double[n_bits];
+	int start_bit, end_bit;
+	get_start_end_bits(n_bits, &start_bit, &end_bit);
+	int total_bits = end_bit - start_bit;
+	double *M = new double[total_bits];
+	double *HA = new double[total_bits];
+	double *HB = new double[total_bits];
 
 	mutual_information(A, B, n_elem, M);
 	bit_count_entropy(A, n_elem, HA);
 	bit_count_entropy(B, n_elem, HB);
 
-	for (int i = 0; i < n_bits; i++) {
+	for (int i = 0; i < total_bits; i++) {
 		if (HA[i] + HB[i] > 0) {
 			R[i] = 2*M[i]/(HA[i] + HB[i]);
 		} else if (M[i] == HA[i] == HB[i] == 0) {
@@ -743,15 +774,18 @@ void redundancy(T *A, T *B, size_t n_elem, double *R) {
 template <typename T>
 double preserved_information_template(T *A, T *B, size_t n_elem) {
 	const int n_bits = sizeof(A[0]) * CHAR_BIT;
-	double *R = new double[n_bits];
-	double *I = new double[n_bits];
+	int start_bit, end_bit;
+	get_start_end_bits(n_bits, &start_bit, &end_bit);
+	int total_bits = end_bit - start_bit;
+	double *R = new double[total_bits];
+	double *I = new double[total_bits];
 
 	redundancy(A, B, n_elem, R);
 	bitwise_real_information(A, n_elem, I);
 
 	double P = 0;
 	double total_information = 0;
-	for (int i = 0; i < n_bits; i++) {
+	for (int i = 0; i < total_bits; i++) {
 		P += R[i] * I[i] ;
 		total_information += I[i];
 	}
