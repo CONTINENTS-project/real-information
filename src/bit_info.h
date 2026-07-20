@@ -16,14 +16,16 @@ const bool mantissa_only = false;
 void get_start_end_bits(int n_bits, int *start, int *end) {
 	if (mantissa_only) {
 		if (n_bits == 32) {
-			*start = 9;
+			*end = 23;
 		} else if (n_bits == 64) {
-			*start = 11;
+			*end = 52;
 		}
 	} else {
-		*start = 0;
+		*end = n_bits;
 	}
-	*end = n_bits;
+	*start = 0;
+
+	//printf("get start end bits start end %d %d\n", *start, *end);
 }
 
 template<typename T>
@@ -458,16 +460,20 @@ template <typename T>
 void bit_pair_count(T *A, T *B, size_t n_elem, size_t *pair_counts) {
 	bit_pair_count_calls += 1;
 	const int n_bits = sizeof(T) * CHAR_BIT;
+	int start_bit, end_bit;
+	get_start_end_bits(n_bits, &start_bit, &end_bit);
+	int total_bits = end_bit - start_bit;
+	#pragma omp parallel for reduction(+:pair_counts[:total_bits * n_joint_counts])
 	for (size_t i = 0; i < n_elem; i++) {
 		auto a = reinterpret_cast<typename HELP<T>::type *>(&A[i]);
 		auto b = reinterpret_cast<typename HELP<T>::type *>(&B[i]);
 		int pair_count[4];
-		for (int j = 0; j < n_bits; j++) {
+		for (int j = start_bit; j < end_bit; j++) {
 			bit_pair_count<sizeof(T) * CHAR_BIT>(*a, *b, j, pair_count);
-			pair_counts[j * n_joint_counts] += pair_count[0];
-			pair_counts[j * n_joint_counts + 1] += pair_count[1];
-			pair_counts[j * n_joint_counts + 2] += pair_count[2];
-			pair_counts[j * n_joint_counts + 3] += pair_count[3];
+			pair_counts[(j - start_bit) * n_joint_counts] += pair_count[0];
+			pair_counts[(j - start_bit) * n_joint_counts + 1] += pair_count[1];
+			pair_counts[(j - start_bit) * n_joint_counts + 2] += pair_count[2];
+			pair_counts[(j - start_bit) * n_joint_counts + 3] += pair_count[3];
 		}
 	}
 }
@@ -846,8 +852,8 @@ int pick_bits_to_shave_template(T *A, size_t n_elem, double tolerance, int nbits
     } else {
   	/* Maybe we aren't throwing out enough. Increase number of bits thrown out */
   	for (int i = nbits + 1; i < max_bits; i++) {
-      	//shave_template<T>(A, n_elem, i, s);
-      	shave_bits<T>(A, n_elem, i, s);
+      	shave_template<T>(A, n_elem, i, s);
+      	//shave_bits<T>(A, n_elem, i, s);
       	auto info = preserved_information_template<T>(A, s, n_elem);
       	if (info <= tolerance) {
       		return i-1; // XXX: Not sure if this should be i-1 or just i...
