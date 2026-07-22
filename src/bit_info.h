@@ -7,11 +7,17 @@
 #include <bitset>
 #include <iostream>
 #include <cmath>
+#include <cassert>
 #include <cstring>
 #include <mpi.h>
 
 inline int get_n_exponent_bits(int nbits);
-const bool mantissa_only = false;
+static const bool mantissa_only = true;
+static const bool mask_zero = true;
+
+// Set EPS
+static const float EPS = 1e-16;
+
 
 void get_start_end_bits(int n_bits, int *start, int *end) {
 	if (mantissa_only) {
@@ -24,8 +30,6 @@ void get_start_end_bits(int n_bits, int *start, int *end) {
 		*end = n_bits;
 	}
 	*start = 0;
-
-	//printf("get start end bits start end %d %d\n", *start, *end);
 }
 
 template<typename T>
@@ -251,13 +255,19 @@ inline int get_n_exponent_bits(int nbits) {
  * @param i Bit position to count (0 for least significant bit).
  */
 template <typename T>
-size_t bit_count(T *A, size_t n_elem, int i) {
+size_t bit_count(T *A, size_t n_elem, int i, size_t *non_zero) {
 	size_t count = 0;
 
+	*non_zero = 0;
 	for (size_t j = 0; j < n_elem; j++) {
+		if (mask_zero && std::abs(A[j]) < EPS) {
+			continue;
+		}
 		auto *b0 = reinterpret_cast<typename HELP<T>::type*>(&A[j]);
 		count += (*b0)[i];
+		(*non_zero)++;
 	}
+	assert(*non_zero > 0);
 
 	return count;
 }
@@ -270,9 +280,13 @@ size_t bit_count(T *A, size_t n_elem, int i) {
  * @return The count of bits set to 1 in the specified bit position across the array.
  */
 template <typename T>
-size_t bit_count_bits(T *A, size_t n_elem, int i) {
+size_t bit_count_bits(T *A, size_t n_elem, int i, size_t *non_zero) {
 	size_t count = 0;
+	*non_zero = 0;
 	for (size_t j = 0; j < n_elem; j++) {
+		if (mask_zero && std::abs(A[j]) < EPS) {
+			continue;
+		}
 		bits<T> b(A[j]);
 		if (std::is_same_v<T, float>) {
 			uint32_t mask = 0x00000001;
@@ -283,7 +297,9 @@ size_t bit_count_bits(T *A, size_t n_elem, int i) {
 			mask <<= i;
 			count += (b.bit_set_64 & mask) ? 1 : 0;
 		}
+		(*non_zero)++;
 	}
+	assert(*non_zero > 0);
 
 	return count;
 }
@@ -295,21 +311,21 @@ size_t bit_count_bits(T *A, size_t n_elem, int i) {
  * @param c Output array to store the count of bits set to 1 for each bit position.
  */
 template <typename T>
-void bit_count(T *A, size_t n_elem, size_t *c) {
+void bit_count(T *A, size_t n_elem, size_t *c, size_t *non_zero) {
 	int n_bits = sizeof(A[0]) * CHAR_BIT;
 	int start_bit, end_bit;
 	get_start_end_bits(n_bits, &start_bit, &end_bit);
 	for (int i = start_bit; i < end_bit; i++) {
-		c[i - start_bit] = bit_count(A, n_elem, i);
+		c[i - start_bit] = bit_count(A, n_elem, i, non_zero);
 	}
 }
 template <typename T>
-void bit_count_bits(T *A, size_t n_elem, size_t *c) {
+void bit_count_bits(T *A, size_t n_elem, size_t *c, size_t *non_zero) {
 	int n_bits = sizeof(A[0]) * CHAR_BIT;
 	int start_bit, end_bit;
 	get_start_end_bits(n_bits, &start_bit, &end_bit);
 	for (int i = start_bit; i < end_bit; i++) {
-		c[i - start_bit] = bit_count_bits(A, n_elem, i);
+		c[i - start_bit] = bit_count_bits(A, n_elem, i, non_zero);
 	}
 }
 
@@ -405,24 +421,31 @@ void bit_pair_count_bits(bits<T> a, bits<T> b, int j, int *p) {
  * @param pair_counts Pointer to an array to store the counts of each bit pair.
  */
 template <typename T>
-void bit_pair_count_bits(T *A, T *B, size_t n_elem, size_t *pair_counts) {
+void bit_pair_count_bits(T *A, T *B, size_t n_elem, size_t *pair_counts, size_t *non_zero) {
 	bit_pair_count_calls += 1;
 	const int n_bits = sizeof(T) * CHAR_BIT;
 	int start_bit, end_bit;
 	get_start_end_bits(n_bits, &start_bit, &end_bit);
 	int total_bits = end_bit - start_bit;
+	*non_zero = 0;
 	#pragma omp parallel for reduction(+:pair_counts[:total_bits * n_joint_counts])
 	for (size_t i = 0; i < n_elem; i++) {
+		if (mask_zero && std::abs(A[i]) < EPS && std::abs(B[i]) < EPS) {
+			continue;
+		}
 		bits<T> a(A[i]);
 		bits<T> b(B[i]);
 		int pair_count[4];
-		for (int j = start_bit; j < end_bit; i++) {
+		for (int j = start_bit; j < end_bit; j++) {
 			bit_pair_count_bits(a, b, j, pair_count);
 			pair_counts[(j - start_bit) * n_joint_counts] += pair_count[0];
 			pair_counts[(j - start_bit) * n_joint_counts + 1] += pair_count[1];
 			pair_counts[(j - start_bit) * n_joint_counts + 2] += pair_count[2];
 			pair_counts[(j - start_bit) * n_joint_counts + 3] += pair_count[3];
 		}
+		//XXX: change this to a reduction of some sort`
+		#pragma omp critical 
+		(*non_zero)++;
 	}
 }
 
@@ -457,7 +480,8 @@ void bit_pair_count(std::bitset<n_bits> a, std::bitset<n_bits> b, int j, int *p)
  * @param pair_counts Pointer to an array to store the counts of each bit pair.
  */
 template <typename T>
-void bit_pair_count(T *A, T *B, size_t n_elem, size_t *pair_counts) {
+void bit_pair_count(T *A, T *B, size_t n_elem, size_t *pair_counts, size_t *non_zero) {
+	*non_zero = 0;
 	bit_pair_count_calls += 1;
 	const int n_bits = sizeof(T) * CHAR_BIT;
 	int start_bit, end_bit;
@@ -465,6 +489,9 @@ void bit_pair_count(T *A, T *B, size_t n_elem, size_t *pair_counts) {
 	int total_bits = end_bit - start_bit;
 	#pragma omp parallel for reduction(+:pair_counts[:total_bits * n_joint_counts])
 	for (size_t i = 0; i < n_elem; i++) {
+		if (mask_zero && std::abs(A[i]) < EPS && std::abs(B[i]) < EPS) {
+			continue;
+		}
 		auto a = reinterpret_cast<typename HELP<T>::type *>(&A[i]);
 		auto b = reinterpret_cast<typename HELP<T>::type *>(&B[i]);
 		int pair_count[4];
@@ -475,6 +502,9 @@ void bit_pair_count(T *A, T *B, size_t n_elem, size_t *pair_counts) {
 			pair_counts[(j - start_bit) * n_joint_counts + 2] += pair_count[2];
 			pair_counts[(j - start_bit) * n_joint_counts + 3] += pair_count[3];
 		}
+		//XXX: change this to a reduction of some sort`
+		#pragma omp critical
+		(*non_zero)++;
 	}
 }
 // End helper functions
@@ -494,11 +524,14 @@ void bit_count_entropy(T *A, size_t n_elem, double *H) {
 	get_start_end_bits(n_bits, &start_bit, &end_bit);
 	int total_bits = end_bit - start_bit;
 	size_t c[total_bits];
-	bit_count(A, n_elem, c);
-	//bit_count_bits(A, n_elem, c); // bits class implementation
+	size_t n_non_zero;
+	//bit_count(A, n_elem, c);
+	bit_count_bits(A, n_elem, c, &n_non_zero); // bits class implementation
+	printf("Non-zero elements: %zu n_elem: %zu\n", n_non_zero, n_elem);
 
 	for (int i = start_bit; i < end_bit; i++) {
-		double p = static_cast<double>(c[i - start_bit])/static_cast<double>(n_elem);
+		//double p = static_cast<double>(c[i - start_bit])/static_cast<double>(n_elem);
+		double p = static_cast<double>(c[i - start_bit])/static_cast<double>(n_non_zero);
 		double p_array[2] = {p, 1 - p};
 		H[i - start_bit] = entropy(p_array, 2);
 	}
@@ -700,17 +733,21 @@ void mutual_information(T *A, T *B, size_t n_elem, double *info) {
 
 	size_t pair_counts[n_joint_counts * total_bits];
 	for (size_t i = 0; i < n_joint_counts * total_bits; i++) pair_counts[i] = 0;
-	//bit_pair_count_bits(A, B, n_elem, pair_counts); // bits class implementation
-	bit_pair_count(A, B, n_elem, pair_counts);
+	size_t n_non_zero;
+	//bit_pair_count(A, B, n_elem, pair_counts, &n_non_zero);
+	bit_pair_count_bits(A, B, n_elem, pair_counts, &n_non_zero); // bits class implementation
 
 	for (int i = 0; i < total_bits; i++) {
 		info[i] = 0;
 		for (int r = 0; r < 2; r++) {
-			double p_r = static_cast<double>(pair_counts[i * n_joint_counts + r * n_counts] + pair_counts[i * n_joint_counts + r * n_counts + 1]) / static_cast<double>(n_elem);
+			//double p_r = static_cast<double>(pair_counts[i * n_joint_counts + r * n_counts] + pair_counts[i * n_joint_counts + r * n_counts + 1]) / static_cast<double>(n_elem);
+			double p_r = static_cast<double>(pair_counts[i * n_joint_counts + r * n_counts] + pair_counts[i * n_joint_counts + r * n_counts + 1]) / static_cast<double>(n_non_zero);
 			for (int s = 0; s < 2; s++) {
-				double p_s = static_cast<double>(pair_counts[i * n_joint_counts + s] + pair_counts[i * n_joint_counts + n_counts + s]) / static_cast<double>(n_elem);
+				//double p_s = static_cast<double>(pair_counts[i * n_joint_counts + s] + pair_counts[i * n_joint_counts + n_counts + s]) / static_cast<double>(n_elem);
+				double p_s = static_cast<double>(pair_counts[i * n_joint_counts + s] + pair_counts[i * n_joint_counts + n_counts + s]) / static_cast<double>(n_non_zero);
 				if (pair_counts[i * n_joint_counts + r * n_counts + s] > 0) {
-					double p_rs = static_cast<double>(pair_counts[i * n_joint_counts + r * n_counts + s]) / static_cast<double>(n_elem);
+					//double p_rs = static_cast<double>(pair_counts[i * n_joint_counts + r * n_counts + s]) / static_cast<double>(n_elem);
+					double p_rs = static_cast<double>(pair_counts[i * n_joint_counts + r * n_counts + s]) / static_cast<double>(n_non_zero);
 					info[i] += p_rs * std::log2(p_rs/(p_r * p_s));
 				}
 			}
@@ -826,8 +863,8 @@ int pick_bits_to_shave_template(T *A, size_t n_elem, double tolerance, int nbits
   if (nbits_old == 0) {
     /* Start with shaving more bits rather than less */
     for (int i = start_bit; i >= 0; i--) {
-    	shave_template<T>(A, n_elem, i, s);
-    	//shave_bits<T>(A, n_elem, i, s); // bits class implementation
+    	//shave_template<T>(A, n_elem, i, s);
+    	shave_bits<T>(A, n_elem, i, s); // bits class implementation
     	auto info = preserved_information_template<T>(A, s, n_elem);
     	if (info > tolerance) {
     		return i;
@@ -837,13 +874,13 @@ int pick_bits_to_shave_template(T *A, size_t n_elem, double tolerance, int nbits
     int nbits = nbits_old;
     	
     /* Check if we should retain more bits first */
-    shave_template<T>(A, n_elem, nbits, s);
-    //shave_bits<T>(A, n_elem, nbits, s); // bits class implementation
+    //shave_template<T>(A, n_elem, nbits, s);
+    shave_bits<T>(A, n_elem, nbits, s); // bits class implementation
     auto info = preserved_information_template<T>(A, s, n_elem);
     if (info <= tolerance) {
       for (int i = nbits - 1; i >= 0; i--) {
-      	shave_template<T>(A, n_elem, i, s);
-      	//shave_bits<T>(A, n_elem, i, s); // bits class implementation
+      	//shave_template<T>(A, n_elem, i, s);
+      	shave_bits<T>(A, n_elem, i, s); // bits class implementation
       	auto info = preserved_information_template<T>(A, s, n_elem);
       	if (info > tolerance) {
       		return i;
@@ -852,8 +889,8 @@ int pick_bits_to_shave_template(T *A, size_t n_elem, double tolerance, int nbits
     } else {
   	/* Maybe we aren't throwing out enough. Increase number of bits thrown out */
   	for (int i = nbits + 1; i < max_bits; i++) {
-      	shave_template<T>(A, n_elem, i, s);
-      	//shave_bits<T>(A, n_elem, i, s);
+      	//shave_template<T>(A, n_elem, i, s);
+      	shave_bits<T>(A, n_elem, i, s);
       	auto info = preserved_information_template<T>(A, s, n_elem);
       	if (info <= tolerance) {
       		return i-1; // XXX: Not sure if this should be i-1 or just i...
