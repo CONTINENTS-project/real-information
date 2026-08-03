@@ -13,7 +13,7 @@
 
 inline int get_n_exponent_bits(int nbits);
 static const bool mantissa_only = true;
-static const bool mask_zero = true;
+static const bool mask_zero = false;
 
 // Set EPS
 static const float EPS = 1e-16;
@@ -937,10 +937,10 @@ template <typename T>
 int binary_search(T *A, size_t n_elem, double tolerance, int start_bit, int high_bit, int low_bit) {
 	T s_high[n_elem];
 	T s_low[n_elem];
-    shave_template<T>(A, n_elem, start_bit, s_high);
-    shave_template<T>(A, n_elem, start_bit-1, s_low);
-    //shave_bits<T>(A, n_elem, start_bit, s_high);  // bits class implementation
-    //shave_bits<T>(A, n_elem, start_bit-1, s_low); // bits class implementation
+    //shave_template<T>(A, n_elem, start_bit, s_high);
+    //shave_template<T>(A, n_elem, start_bit-1, s_low);
+    shave_bits<T>(A, n_elem, start_bit, s_high);  // bits class implementation
+    shave_bits<T>(A, n_elem, start_bit-1, s_low); // bits class implementation
     //bit_rounding_template<T>(A, n_elem, start_bit, s_high);
     //bit_rounding_template<T>(A, n_elem, start_bit-1, s_low);
    	auto info_high = preserved_information_template<T>(A, s_high, n_elem);
