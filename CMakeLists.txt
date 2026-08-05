@@ -5,6 +5,8 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+include(CTest)
+
 find_package(OpenMP REQUIRED)
 
 add_library(bit_info SHARED src/bit_info.cpp)
@@ -33,3 +35,7 @@ install(TARGETS bit_info
 install(FILES src/real_info.py
     DESTINATION .
 )
+
+if(BUILD_TESTING)
+    add_subdirectory(tests)
+endif()

@@ -11,7 +11,7 @@
 #include <mpi.h>
 
 inline int get_n_exponent_bits(int nbits);
-const bool mantissa_only = true;
+const bool mantissa_only = false;
 
 void get_start_end_bits(int n_bits, int *start, int *end) {
 	if (mantissa_only) {
