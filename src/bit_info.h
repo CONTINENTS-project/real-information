@@ -12,8 +12,8 @@
 #include <mpi.h>
 
 inline int get_n_exponent_bits(int nbits);
-static const bool mantissa_only = true;
-static const bool mask_zero = false;
+static const bool mantissa_only = false;
+static const bool mask_zero = true;
 
 // Set EPS
 static const float EPS = 1e-16;

@@ -3,7 +3,7 @@ import os
 import numpy as np
 
 # Load the compiled C library
-_lib_path = os.path.join(os.path.dirname(__file__), 'bit_info.so')
+_lib_path = os.path.join(os.path.dirname(__file__), '../../install/real-info/lib/bit_info.so')
 real_info = ctypes.CDLL(_lib_path)
 
 def _infer_dtype(A):
