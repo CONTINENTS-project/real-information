@@ -12,7 +12,7 @@
 #include <mpi.h>
 
 inline int get_n_exponent_bits(int nbits);
-static const bool mantissa_only = false;
+static const bool mantissa_only = true;
 static const bool mask_zero = true;
 
 // Set EPS
@@ -527,7 +527,7 @@ void bit_count_entropy(T *A, size_t n_elem, double *H) {
 	size_t n_non_zero;
 	//bit_count(A, n_elem, c);
 	bit_count_bits(A, n_elem, c, &n_non_zero); // bits class implementation
-	printf("Non-zero elements: %zu n_elem: %zu\n", n_non_zero, n_elem);
+	assert(n_non_zero > 0);
 
 	for (int i = start_bit; i < end_bit; i++) {
 		//double p = static_cast<double>(c[i - start_bit])/static_cast<double>(n_elem);
@@ -736,6 +736,7 @@ void mutual_information(T *A, T *B, size_t n_elem, double *info) {
 	size_t n_non_zero;
 	//bit_pair_count(A, B, n_elem, pair_counts, &n_non_zero);
 	bit_pair_count_bits(A, B, n_elem, pair_counts, &n_non_zero); // bits class implementation
+	assert(n_non_zero > 0);
 
 	for (int i = 0; i < total_bits; i++) {
 		info[i] = 0;
@@ -853,7 +854,7 @@ double preserved_information_template(T *A, T *B, size_t n_elem) {
 template <typename T>
 int pick_bits_to_shave_template(T *A, size_t n_elem, double tolerance, int nbits_old) {
   int max_bits = sizeof(T) * CHAR_BIT; 
-  T s[n_elem];
+  T *s = new T[n_elem];
   int start_bit;
   if constexpr (std::is_same_v<T, float>) { 
     start_bit = max_bits - n_exponent_bits_float - 1;
@@ -899,6 +900,8 @@ int pick_bits_to_shave_template(T *A, size_t n_elem, double tolerance, int nbits
     }
 
   }
+
+  delete[] s;
 
   return 0;
 }
@@ -975,6 +978,11 @@ int binary_search(T *A, size_t n_elem, double tolerance, int start_bit, int high
 template <typename T>
 int pick_bits_to_shave_binary_search_template(T *A, size_t n_elem, double tolerance, int nbits_old) {
   int max_shave_bits = get_max_shave_bits<T>();
+
+  size_t n_non_zero = 0;
+  if (n_non_zero == 0) {
+	  return 0;
+  }
 
   bit_pair_count_calls = 0;
   if (nbits_old == 0) {
