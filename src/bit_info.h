@@ -14,9 +14,68 @@
 inline int get_n_exponent_bits(int nbits);
 static const bool mantissa_only = true;
 static const bool mask_zero = true;
+static const bool fixed_point = false;
 
 // Set EPS
 static const float EPS = 1e-16;
+
+template <int SB, typename T>
+class FP {
+  public:
+	int64_t value;	
+
+	//static constexpr int64_t scale_bits = 1 << SB;
+	int64_t scale_bits;
+
+    FP() {
+		if (std::is_same<T,float>() || std::is_same<T,double>()) {
+		  scale_bits = std::pow(10, SB);
+		  value = 0;
+		} else {
+		  std::cout << "Expected float or double type\n";
+		  std::abort();
+		}
+	}
+
+    FP(T x) {
+		if (std::is_same<T,float>() || std::is_same<T,double>()) {
+		  scale_bits = std::pow(10, SB);
+		  value = static_cast<int64_t>(x * scale_bits);
+		} else {
+		  std::cout << "Expected float or double type\n";
+		  std::abort();
+		}
+	}
+
+	T convert_back() {
+		return static_cast<T>(value) / scale_bits;
+	}
+
+	FP operator+(const FP &other) {
+		FP<SB,T> return_value;
+		return_value.value = value + other.value;
+		return return_value;
+	}
+
+	FP operator-(const FP &other) {
+		FP<SB,T> return_value;
+		return_value.value = value - other.value;
+		return return_value;
+	}
+
+	FP operator*(const FP &other) {
+		FP<SB,T> return_value;
+		return_value.value = value * other.value / scale_bits; // When multiplying we have two factors of scale_bits, so need to remove one.
+		return return_value;
+	}
+
+	FP operator/(const FP &other) {
+		FP<SB,T> return_value;
+		return_value.value = (value * scale_bits) / other.value; // When dividing we have two factors of scale_bits, so need to remove one.
+		return return_value;
+	}
+
+};
 
 
 void get_start_end_bits(int n_bits, int *start, int *end) {
@@ -51,7 +110,10 @@ class bits{
 		 * @param x Input value.
 		 */
 		bits(T x) {
-			if (std::is_same_v<T, float>) {
+			if (fixed_point) {
+				FP<10,T> x_fp(x);
+				std::memcpy(&bit_set_64, &x_fp.value, sizeof(int64_t));
+			} else if (std::is_same_v<T, float>) {
 				std::memcpy(&bit_set_32, &x, sizeof(float));
 			} else if (std::is_same_v<T, double>) {
 				std::memcpy(&bit_set_64, &x, sizeof(double));
@@ -64,6 +126,11 @@ class bits{
 		 */
 		T convert_back() {
 			T result;
+			if (fixed_point) {
+				FP<10,T> temp;
+				std::memcpy(&temp.value, &bit_set_64, sizeof(int64_t));
+				result = temp.convert_back();
+			}
 			if (std::is_same_v<T, float>) {
 				std::memcpy(&result, &bit_set_32, sizeof(float));
 			} else if (std::is_same_v<T, double>) {
