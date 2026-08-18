@@ -979,9 +979,17 @@ template <typename T>
 int pick_bits_to_shave_binary_search_template(T *A, size_t n_elem, double tolerance, int nbits_old) {
   int max_shave_bits = get_max_shave_bits<T>();
 
-  size_t n_non_zero = 0;
-  if (n_non_zero == 0) {
-	  return 0;
+  // XXX: Why do we need this?
+  if (mask_zero) {
+    size_t n_non_zero = 0;
+	for (size_t i = 0; i < n_elem; i++) {
+	  if (std::abs(A[i]) >= EPS) {
+		n_non_zero++;
+	  }
+	}
+    if (n_non_zero == 0) {
+      return 0;
+    }
   }
 
   bit_pair_count_calls = 0;
