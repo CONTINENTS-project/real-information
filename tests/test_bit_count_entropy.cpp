@@ -7,7 +7,8 @@ int main() {
 	read_input_data(filename, data, n_elements);
 
 	double H[32];
-	bit_count_entropy<float>(data, n_elements, H);
+	real_info_params params;
+	bit_count_entropy<float>(params, data, n_elements, H);
 
 	double H_expected[32];
 	read_yaml_list("/work/d446/d446/ab_continents/cesm_workflow/real-information/tests/expected.yaml", "bit_count_entropy", H_expected, 32);

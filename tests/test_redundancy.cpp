@@ -9,7 +9,8 @@ int main() {
 	float *shaved_data = new float[n_elements];
 	shave_template<float>(data, n_elements, 4, shaved_data);
 	double *R = new double[32];
-	redundancy<float>(data, shaved_data, n_elements, R);
+	real_info_params params;
+	redundancy<float>(params, data, shaved_data, n_elements, R);
 
 	double R_expected[32];
 	read_yaml_list("/work/d446/d446/ab_continents/cesm_workflow/real-information/tests/expected.yaml", "redundancy", R_expected, 32);

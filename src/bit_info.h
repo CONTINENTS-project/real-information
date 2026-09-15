@@ -178,6 +178,9 @@ class real_info_params {
 		bool fixed_point;
 		int fixed_point_scale_bits;
 	
+		real_info_params()
+			: config_file(nullptr), mantissa_only(false), mask_zero(false), fixed_point(false), fixed_point_scale_bits(10) {}
+
 		real_info_params(char *config_file) {
 			this->config_file = config_file;
 			read_yaml_scalar(config_file, "mantissa_only", &mantissa_only);
@@ -187,7 +190,7 @@ class real_info_params {
 		}
 };
 
-template <int SB, typename T>
+template <typename T>
 class FP {
   public:
 	int64_t value;	
@@ -195,7 +198,7 @@ class FP {
 	//static constexpr int64_t scale_bits = 1 << SB;
 	int64_t scale_bits;
 
-    FP() {
+    FP(int SB) {
 		if (std::is_same_v<T,float> || std::is_same_v<T,double>) {
 		  scale_bits = std::pow(10, SB);
 		  value = 0;
@@ -205,7 +208,7 @@ class FP {
 		}
 	}
 
-    FP(T x) {
+    FP(int SB, T x) {
 		if (std::is_same_v<T,float> || std::is_same_v<T,double>) {
 		  scale_bits = std::pow(10, SB);
 		  value = static_cast<int64_t>(x * scale_bits);
@@ -220,25 +223,25 @@ class FP {
 	}
 
 	FP operator+(const FP &other) {
-		FP<SB,T> return_value;
+		FP<T> return_value;
 		return_value.value = value + other.value;
 		return return_value;
 	}
 
 	FP operator-(const FP &other) {
-		FP<SB,T> return_value;
+		FP<T> return_value;
 		return_value.value = value - other.value;
 		return return_value;
 	}
 
 	FP operator*(const FP &other) {
-		FP<SB,T> return_value;
+		FP<T> return_value;
 		return_value.value = value * other.value / scale_bits; // When multiplying we have two factors of scale_bits, so need to remove one.
 		return return_value;
 	}
 
 	FP operator/(const FP &other) {
-		FP<SB,T> return_value;
+		FP<T> return_value;
 		return_value.value = (value * scale_bits) / other.value; // When dividing we have two factors of scale_bits, so need to remove one.
 		return return_value;
 	}
@@ -269,17 +272,21 @@ template<typename T>
  * @tparam T Floating-point type (`float` or `double`).
  */
 class bits{
+	private:
+		const real_info_params &params_;
+
 	public:
 		uint32_t bit_set_32;
 		uint64_t bit_set_64;
 
 		/**
 		 * @brief Construct from a floating-point value by copying its bit pattern.
+		 * @param RI_params Real information parameters.
 		 * @param x Input value.
 		 */
-		bits(T x) {
-			if (fixed_point) {
-				FP<10,T> x_fp(x);
+		bits(const real_info_params &params, T x) : params_(params) {
+			if (params_.fixed_point) {
+				FP<T> x_fp(params_.fixed_point_scale_bits, x);
 				std::memcpy(&bit_set_64, &x_fp.value, sizeof(int64_t));
 			} else if (std::is_same_v<T, float>) {
 				std::memcpy(&bit_set_32, &x, sizeof(float));
@@ -294,8 +301,8 @@ class bits{
 		 */
 		T convert_back() {
 			T result;
-			if (fixed_point) {
-				FP<10,T> temp;
+			if (params_.fixed_point) {
+				FP<T> temp(params_.fixed_point_scale_bits);
 				std::memcpy(&temp.value, &bit_set_64, sizeof(int64_t));
 				result = temp.convert_back();
 			} else if (std::is_same_v<T, float>) {
@@ -311,7 +318,7 @@ class bits{
 		 * @param n Number of least-significant bits to shave.
 		 */
 		void shave(int n) {
-			if (fixed_point) {
+			if (params_.fixed_point) {
 				uint64_t mask = 0xFFFFFFFFFFFFFFFF << n;
 				bit_set_64 &= mask;
 		    } else if (std::is_same_v<T, float>) {
@@ -328,7 +335,7 @@ class bits{
 		 * @param n Number of least-significant bits to set.
 		 */
 		void set(int n) {
-			if (fixed_point) {
+			if (params_.fixed_point) {
 				uint64_t mask = 0xFFFFFFFFFFFFFFFF << n;
 				bit_set_64 |= ~mask;
 		    } else if (std::is_same_v<T, float>) {
@@ -346,7 +353,7 @@ class bits{
 		 */
 		void halfshave(int n) {
 			int nbits = sizeof(T) * CHAR_BIT;
-			if (fixed_point) {
+			if (params_.fixed_point) {
 				uint64_t keep_mask = 0xFFFFFFFFFFFFFFFF << n;
 				bit_set_64 &= keep_mask;
 				uint64_t round_up_mask = 0x8000000000000000 >> (nbits - n - 1);
@@ -375,7 +382,7 @@ class bits{
 			int shift = mantissa_bits - keepbits - 1;
 			shift -= (keepbits == mantissa_bits) ? 1 : 0;
 
-			if (fixed_point) {
+			if (params_.fixed_point) {
 				uint64_t upper_mask;
 				if (nbits - n + 1 >= 64) {
 					upper_mask = 0x0000000000000000; // bitshift leads to undefined behaviour if greater than number of bits, and what we really want are all zeros
@@ -418,9 +425,9 @@ class bits{
  * @param shaved Output array of shaved values.
  */
 template <typename T>
-void shave_bits(T *A, size_t n_elem, int n, T *shaved) {
+void shave_bits(const real_info_params &RI_params, T *A, size_t n_elem, int n, T *shaved) {
 	for (size_t i = 0; i < n_elem; i++) {
-		bits<T> b(A[i]);
+		bits<T> b(RI_params, A[i]);
 		b.shave(n);
 		shaved[i] = b.convert_back();
 	}
@@ -428,15 +435,16 @@ void shave_bits(T *A, size_t n_elem, int n, T *shaved) {
 
 /** 
  * @brief Half-shave the lowest `n` bits from each element in an array.
+ * @param RI_params Real information parameters.
  * @param A Input array of type `T`.
  * @param n_elem Number of elements in the array.
  * @param n Number of least-significant bits to half-shave.
  * @param halfshaved Output array of half-shaved values.
  */
 template <typename T>
-void halfshave_bits(T *A, size_t n_elem, int n, T *halfshaved) {
+void halfshave_bits(const real_info_params &RI_params, T *A, size_t n_elem, int n, T *halfshaved) {
 	for (size_t i = 0; i < n_elem; i++) {
-		bits<T> b(A[i]);
+		bits<T> b(RI_params, A[i]);
 		b.halfshave(n);
 		halfshaved[i] = b.convert_back();
 	}
@@ -444,15 +452,16 @@ void halfshave_bits(T *A, size_t n_elem, int n, T *halfshaved) {
 
 /** 
  * @brief Bitwise round the `n` least-significant bits from each element in an array.
+ * @param RI_params Real information parameters.
  * @param A Input array of type `T`.
  * @param n_elem Number of elements in the array.
  * @param n Number of least-significant bits to round.
  * @param bit_rounding_result Output array of rounded values.
  */
 template <typename T>
-void bit_rounding_bits(T *A, size_t n_elem, int n, T *bit_rounding_result) {
+void bit_rounding_bits(const real_info_params &RI_params, T *A, size_t n_elem, int n, T *bit_rounding_result) {
 	for (size_t i = 0; i < n_elem; i++) {
-		bits<T> b(A[i]);
+		bits<T> b(RI_params, A[i]);
 		b.round(n);
 		bit_rounding_result[i] = b.convert_back();
 	}
@@ -460,15 +469,16 @@ void bit_rounding_bits(T *A, size_t n_elem, int n, T *bit_rounding_result) {
 
 /** 
  * @brief Set the lowest `n` bits for each element in an array.
+ * @param RI_params Real information parameters.
  * @param A Input array of type `T`.
  * @param n_elem Number of elements in the array.
  * @param n Number of least-significant bits to set.
  * @param set Output array of set values.
  */
 template <typename T>
-void set_bits(T *A, size_t n_elem, int n, T *set) {
+void set_bits(const real_info_params &RI_params, T *A, size_t n_elem, int n, T *set) {
 	for (size_t i = 0; i < n_elem; i++) {
-		bits<T> b(A[i]);
+		bits<T> b(RI_params, A[i]);
 		b.set(n);
 		set[i] = b.convert_back();
 	}
@@ -529,23 +539,22 @@ size_t bit_count(T *A, size_t n_elem, int i, size_t *non_zero) {
 
 /**
  * @brief Counts the number of bits set to 1 in a specific bit position across an array using the `bits` class.
+ * @param RI_params Real information parameters.
  * @param A Input array of type `T`.
  * @param n_elem Number of elements in the array.
  * @param i Bit position to count (0 for least significant bit).
  * @return The count of bits set to 1 in the specified bit position across the array.
  */
 template <typename T>
-size_t bit_count_bits(T *A, size_t n_elem, int i, size_t *non_zero) {
+size_t bit_count_bits(const real_info_params &RI_params, T *A, size_t n_elem, int i, size_t *non_zero) {
 	size_t count = 0;
 	*non_zero = 0;
 	for (size_t j = 0; j < n_elem; j++) {
-		if (mask_zero && std::abs(A[j]) < EPS) {
-			assert(mask_zero);
-			assert(std::abs(A[j]) < EPS);
+		if (RI_params.mask_zero && std::abs(A[j]) < EPS) {
 			continue;
 		}
-		bits<T> b(A[j]);
-		if (fixed_point) {
+		bits<T> b(RI_params, A[j]);
+		if (RI_params.fixed_point) {
 			uint64_t mask = 0x0000000000000001;
 			mask <<= i;
 			count += (b.bit_set_64 & mask) ? 1 : 0;
@@ -581,12 +590,12 @@ void bit_count(T *A, size_t n_elem, size_t *c, size_t *non_zero) {
 	}
 }
 template <typename T>
-void bit_count_bits(T *A, size_t n_elem, size_t *c, size_t *non_zero) {
+void bit_count_bits(const real_info_params &RI_params, T *A, size_t n_elem, size_t *c, size_t *non_zero) {
 	int n_bits = sizeof(A[0]) * CHAR_BIT;
 	int start_bit, end_bit;
 	get_start_end_bits(n_bits, &start_bit, &end_bit);
 	for (int i = start_bit; i < end_bit; i++) {
-		c[i - start_bit] = bit_count_bits(A, n_elem, i, non_zero);
+		c[i - start_bit] = bit_count_bits(RI_params, A, n_elem, i, non_zero);
 	}
 }
 
@@ -641,16 +650,17 @@ double bitpattern_entropy(T *A, size_t n_elem) {
 
 /**
  * @brief Helper function to compute pair counts at a particular position in two numbers represented as bits.
+ * @param RI_params Real information parameters.
  * @param a First number represented as bits.
  * @param b Second number represented as bits.
  * @param j Bit position to compare.
  * @param p Output array to store the counts of each bit pair.
  */
 template <typename T>
-void bit_pair_count_bits(bits<T> a, bits<T> b, int j, int *p) {
+void bit_pair_count_bits(const real_info_params &RI_params, const bits<T> &a, const bits<T> &b, int j, int *p) {
 	int bit_a, bit_b;
 
-	if (fixed_point) {
+	if (RI_params.fixed_point) {
 		uint64_t mask = 0x0000000000000001;
 		mask <<= j;
 		bit_a = (a.bit_set_64 & mask) ? 1 : 0;
@@ -681,13 +691,14 @@ void bit_pair_count_bits(bits<T> a, bits<T> b, int j, int *p) {
 
 /**
  * @brief Counts the occurrences of bit pairs (00, 01, 10, 11) between two arrays.
+ * @param RI_params Real information parameters.
  * @param A Pointer to the first array.	
  * @param B Pointer to the second array.
  * @param n_elem The number of elements in the arrays A and B.
  * @param pair_counts Pointer to an array to store the counts of each bit pair.
  */
 template <typename T>
-void bit_pair_count_bits(T *A, T *B, size_t n_elem, size_t *pair_counts, size_t *non_zero) {
+void bit_pair_count_bits(const real_info_params &RI_params, T *A, T *B, size_t n_elem, size_t *pair_counts, size_t *non_zero) {
 	bit_pair_count_calls += 1;
 	const int n_bits = sizeof(T) * CHAR_BIT;
 	int start_bit, end_bit;
@@ -696,20 +707,20 @@ void bit_pair_count_bits(T *A, T *B, size_t n_elem, size_t *pair_counts, size_t 
 	*non_zero = 0;
 	#pragma omp parallel for reduction(+:pair_counts[:total_bits * n_joint_counts])
 	for (size_t i = 0; i < n_elem; i++) {
-		if (mask_zero && std::abs(A[i]) < EPS && std::abs(B[i]) < EPS) {
+		if (RI_params.mask_zero && std::abs(A[i]) < EPS && std::abs(B[i]) < EPS) {
 			continue;
 		}
-		bits<T> a(A[i]);
-		bits<T> b(B[i]);
+		bits<T> a(RI_params, A[i]);
+		bits<T> b(RI_params, B[i]);
 		int pair_count[4];
 		for (int j = start_bit; j < end_bit; j++) {
-			bit_pair_count_bits(a, b, j, pair_count);
+			bit_pair_count_bits(RI_params, a, b, j, pair_count);
 			pair_counts[(j - start_bit) * n_joint_counts] += pair_count[0];
 			pair_counts[(j - start_bit) * n_joint_counts + 1] += pair_count[1];
 			pair_counts[(j - start_bit) * n_joint_counts + 2] += pair_count[2];
 			pair_counts[(j - start_bit) * n_joint_counts + 3] += pair_count[3];
 		}
-		//XXX: change this to a reduction of some sort`
+		//XXX: change this to a reduction of some sort
 		#pragma omp critical 
 		(*non_zero)++;
 	}
@@ -784,7 +795,7 @@ void bit_pair_count(T *A, T *B, size_t n_elem, size_t *pair_counts, size_t *non_
  * @param H Pointer to an array to store the entropy of each bit position.
  */
 template <typename T>
-void bit_count_entropy(T *A, size_t n_elem, double *H) {
+void bit_count_entropy(const real_info_params &RI_params, T *A, size_t n_elem, double *H) {
 	const int n_bits = sizeof(A[0]) * CHAR_BIT;
 	int start_bit, end_bit;
 	get_start_end_bits(n_bits, &start_bit, &end_bit);
@@ -792,7 +803,7 @@ void bit_count_entropy(T *A, size_t n_elem, double *H) {
 	size_t c[total_bits];
 	size_t n_non_zero;
 	//bit_count(A, n_elem, c);
-	bit_count_bits(A, n_elem, c, &n_non_zero); // bits class implementation
+	bit_count_bits(RI_params, A, n_elem, c, &n_non_zero); // bits class implementation
 	assert(n_non_zero > 0);
 
 	for (int i = start_bit; i < end_bit; i++) {
@@ -989,9 +1000,10 @@ void groom_template(T *a, size_t n_elem, int n, T *groomed) {
  * @param B Pointer to the second input array.
  * @param n_elem The number of elements in the input arrays.
  * @param info Pointer to an array to store the mutual information for each bit position.
+ * @param RI_params Real information parameters.
  */
 template <typename T>
-void mutual_information(T *A, T *B, size_t n_elem, double *info) {
+void mutual_information(const real_info_params &RI_params, T *A, T *B, size_t n_elem, double *info) {
 	const int n_bits = sizeof(A[0]) * CHAR_BIT;
 	int start_bit, end_bit;
 	get_start_end_bits(n_bits, &start_bit, &end_bit);
@@ -1001,7 +1013,7 @@ void mutual_information(T *A, T *B, size_t n_elem, double *info) {
 	for (size_t i = 0; i < n_joint_counts * total_bits; i++) pair_counts[i] = 0;
 	size_t n_non_zero;
 	//bit_pair_count(A, B, n_elem, pair_counts, &n_non_zero);
-	bit_pair_count_bits(A, B, n_elem, pair_counts, &n_non_zero); // bits class implementation
+	bit_pair_count_bits(RI_params, A, B, n_elem, pair_counts, &n_non_zero); // bits class implementation
 	assert(n_non_zero > 0);
 
 	for (int i = 0; i < total_bits; i++) {
@@ -1029,27 +1041,29 @@ void mutual_information(T *A, T *B, size_t n_elem, double *info) {
  * @brief Compute real information stored in given array by evaluating mutual information of array with a shifted version of itself
  * 
  * @tparam T Type of elements in array
+ * @param RI_params Real information parameters
  * @param A Pointer to array
  * @param n_elem number of elements in A
  * @param info Pointer to array storing real information
  */
 template <typename T>
-void bitwise_real_information(T *A, size_t n_elem, double *info) {
+void bitwise_real_information(const real_info_params &RI_params, T *A, size_t n_elem, double *info) {
 	T *B = A + 1;
-	mutual_information(A, B, n_elem - 1, info);
+	mutual_information(RI_params, A, B, n_elem - 1, info);
 }
 
 /**
  * @brief Computes amount of redundant information between two arrays
  *
  * @tparam The types of arrays A and B
+ * @param RI_params Real information parameters
  * @param A Pointer to first array 
  * @param B Pointer to first array 
  * @param n_elem Number of elements in each array 
  * @param R Pointer to array to store redundancy for each bit position 
  */
 template <typename T>
-void redundancy(T *A, T *B, size_t n_elem, double *R) {
+void redundancy(const real_info_params &RI_params, T *A, T *B, size_t n_elem, double *R) {
 	const int n_bits = sizeof(A[0]) * CHAR_BIT;
 	int start_bit, end_bit;
 	get_start_end_bits(n_bits, &start_bit, &end_bit);
@@ -1058,9 +1072,9 @@ void redundancy(T *A, T *B, size_t n_elem, double *R) {
 	double *HA = new double[total_bits];
 	double *HB = new double[total_bits];
 
-	mutual_information(A, B, n_elem, M);
-	bit_count_entropy(A, n_elem, HA);
-	bit_count_entropy(B, n_elem, HB);
+	mutual_information(RI_params, A, B, n_elem, M);
+	bit_count_entropy(RI_params, A, n_elem, HA);
+	bit_count_entropy(RI_params, B, n_elem, HB);
 
 	for (int i = 0; i < total_bits; i++) {
 		if (HA[i] + HB[i] > 0) {
@@ -1076,13 +1090,14 @@ void redundancy(T *A, T *B, size_t n_elem, double *R) {
  *  @brief Computes real information preserved in array B with respect to A.
  *
  *  @tparam T Type of elements in arrays A and B
+ *  @param RI_params Real information parameters
  *  @param A Pointer to original array
  *  @param B Pointer to shaved array
  *  @param n_elem Number of elements in each array
  *  @return Fraction of real information preserved in B with respect to A
  */
 template <typename T>
-double preserved_information_template(T *A, T *B, size_t n_elem) {
+double preserved_information_template(const real_info_params &RI_params, T *A, T *B, size_t n_elem) {
 	const int n_bits = sizeof(A[0]) * CHAR_BIT;
 	int start_bit, end_bit;
 	get_start_end_bits(n_bits, &start_bit, &end_bit);
@@ -1090,8 +1105,8 @@ double preserved_information_template(T *A, T *B, size_t n_elem) {
 	double *R = new double[total_bits];
 	double *I = new double[total_bits];
 
-	redundancy(A, B, n_elem, R);
-	bitwise_real_information(A, n_elem, I);
+	redundancy(RI_params, A, B, n_elem, R);
+	bitwise_real_information(RI_params, A, n_elem, I);
 
 	double P = 0;
 	double total_information = 0;
@@ -1116,13 +1131,14 @@ double preserved_information_template(T *A, T *B, size_t n_elem) {
  * @param tolerance The minimum fraction of preserved information required.
  * @param nbits_old The previous number of bits shaved (0 if starting fresh).
  * @return The number of bits to shave from each element in the array.
+ * @param RI_params Real information parameters
  */
 template <typename T>
-int pick_bits_to_shave_template(T *A, size_t n_elem, double tolerance, int nbits_old) {
+int pick_bits_to_shave_template(const real_info_params &RI_params, T *A, size_t n_elem, double tolerance, int nbits_old) {
   int max_bits = sizeof(T) * CHAR_BIT; 
   T *s = new T[n_elem];
   int start_bit;
-  if (fixed_point) {
+  if (RI_params.fixed_point) {
 	max_bits = sizeof(int64_t) * CHAR_BIT;
 	start_bit = max_bits - 1;
   } else if constexpr (std::is_same_v<T, float>) { 
@@ -1134,8 +1150,8 @@ int pick_bits_to_shave_template(T *A, size_t n_elem, double tolerance, int nbits
     /* Start with shaving more bits rather than less */
     for (int i = start_bit; i >= 0; i--) {
     	//shave_template<T>(A, n_elem, i, s);
-    	shave_bits<T>(A, n_elem, i, s); // bits class implementation
-    	auto info = preserved_information_template<T>(A, s, n_elem);
+		shave_bits<T>(RI_params, A, n_elem, i, s); // bits class implementation
+		auto info = preserved_information_template<T>(RI_params, A, s, n_elem);
     	if (info > tolerance) {
     		return i;
     	}
@@ -1145,13 +1161,13 @@ int pick_bits_to_shave_template(T *A, size_t n_elem, double tolerance, int nbits
     	
     /* Check if we should retain more bits first */
     //shave_template<T>(A, n_elem, nbits, s);
-    shave_bits<T>(A, n_elem, nbits, s); // bits class implementation
-    auto info = preserved_information_template<T>(A, s, n_elem);
+	shave_bits<T>(RI_params, A, n_elem, nbits, s); // bits class implementation
+	auto info = preserved_information_template<T>(RI_params, A, s, n_elem);
     if (info <= tolerance) {
       for (int i = nbits - 1; i >= 0; i--) {
       	//shave_template<T>(A, n_elem, i, s);
-      	shave_bits<T>(A, n_elem, i, s); // bits class implementation
-      	auto info = preserved_information_template<T>(A, s, n_elem);
+		shave_bits<T>(RI_params, A, n_elem, i, s); // bits class implementation
+		auto info = preserved_information_template<T>(RI_params, A, s, n_elem);
       	if (info > tolerance) {
       		return i;
       	}
@@ -1160,8 +1176,8 @@ int pick_bits_to_shave_template(T *A, size_t n_elem, double tolerance, int nbits
   	/* Maybe we aren't throwing out enough. Increase number of bits thrown out */
   	for (int i = nbits + 1; i < max_bits; i++) {
       	//shave_template<T>(A, n_elem, i, s);
-      	shave_bits<T>(A, n_elem, i, s);
-      	auto info = preserved_information_template<T>(A, s, n_elem);
+		shave_bits<T>(RI_params, A, n_elem, i, s);
+		auto info = preserved_information_template<T>(RI_params, A, s, n_elem);
       	if (info <= tolerance) {
       		return i-1; // XXX: Not sure if this should be i-1 or just i...
       	}
@@ -1179,13 +1195,14 @@ int pick_bits_to_shave_template(T *A, size_t n_elem, double tolerance, int nbits
  * @brief Gets the maximum number of bits that can be shaved for a floating point type.
  *
  * @tparam T The floating point type (float or double).
+ * @param RI_params Real information parameters.
  * @return The maximum number of least significant bits that can be cleared while
  *         preserving the exponent bits and sign bit.
  */
 template <typename T>
-int get_max_shave_bits() {
+int get_max_shave_bits(const real_info_params &RI_params) {
   int max_bits = sizeof(T) * CHAR_BIT; 
-  if (fixed_point) {
+  if (RI_params.fixed_point) {
 	max_bits = sizeof(int64_t) * CHAR_BIT;
 	return max_bits - 1;
   } else if constexpr (std::is_same_v<T, float>) { 
@@ -1209,28 +1226,28 @@ int get_max_shave_bits() {
  * @return Number of bits that can be shaved while maintaining information above tolerance.
  */
 template <typename T>
-int binary_search(T *A, size_t n_elem, double tolerance, int start_bit, int high_bit, int low_bit) {
+int binary_search(const real_info_params &RI_params, T *A, size_t n_elem, double tolerance, int start_bit, int high_bit, int low_bit) {
 	T s_high[n_elem];
 	T s_low[n_elem];
     //shave_template<T>(A, n_elem, start_bit, s_high);
     //shave_template<T>(A, n_elem, start_bit-1, s_low);
-    shave_bits<T>(A, n_elem, start_bit, s_high);  // bits class implementation
-    shave_bits<T>(A, n_elem, start_bit-1, s_low); // bits class implementation
+	shave_bits<T>(RI_params, A, n_elem, start_bit, s_high);  // bits class implementation
+	shave_bits<T>(RI_params, A, n_elem, start_bit-1, s_low); // bits class implementation
     //bit_rounding_template<T>(A, n_elem, start_bit, s_high);
     //bit_rounding_template<T>(A, n_elem, start_bit-1, s_low);
-   	auto info_high = preserved_information_template<T>(A, s_high, n_elem);
-   	auto info_low = preserved_information_template<T>(A, s_low, n_elem);
+   	auto info_high = preserved_information_template<T>(RI_params, A, s_high, n_elem);
+   	auto info_low = preserved_information_template<T>(RI_params, A, s_low, n_elem);
 	// Note: info_low is always >= info_high since we are shaving fewer bits
    	if (info_high < tolerance && info_low >= tolerance) {
    		return start_bit-1;
    	} else if (info_low < tolerance) {
 		int new_start_bit = (start_bit - low_bit)/2 + low_bit;
 		if (new_start_bit == 0) return new_start_bit;
-		return binary_search<T>(A, n_elem, tolerance, new_start_bit, start_bit, low_bit);
+		return binary_search<T>(RI_params, A, n_elem, tolerance, new_start_bit, start_bit, low_bit);
 	} else if (info_high >= tolerance) {
 		int new_start_bit = (high_bit - start_bit)/2 + start_bit;
 		if (new_start_bit == start_bit) return new_start_bit;
-		return binary_search<T>(A, n_elem, tolerance, new_start_bit, high_bit, start_bit);
+		return binary_search<T>(RI_params, A, n_elem, tolerance, new_start_bit, high_bit, start_bit);
 	} else {
 		std::cout << "binary search error start bit " << start_bit << " old bits shaved " << start_bit << " info high " << info_high << " info low " << info_low << " tolerance " << tolerance << "\n";
 		return 0;
@@ -1241,18 +1258,20 @@ int binary_search(T *A, size_t n_elem, double tolerance, int start_bit, int high
  * @brief Picks the number of bits to shave from elements in array A such that the preserved information is above a given tolerance.
  *
  * @tparam T The type of the elements in the input array.
+ * @param RI_params Real information parameters.
  * @param A Pointer to the input array.
  * @param n_elem The number of elements in the input array.
  * @param tolerance The minimum fraction of preserved information required.
  * @param nbits_old The previous number of bits shaved (0 if starting fresh).
  * @return The number of bits to shave from each element in the array.
+ * @param config_file The path to the configuration file.
  */
 template <typename T>
-int pick_bits_to_shave_binary_search_template(T *A, size_t n_elem, double tolerance, int nbits_old, char *config_file) {
-  int max_shave_bits = get_max_shave_bits<T>();
+int pick_bits_to_shave_binary_search_template(const real_info_params &RI_params, T *A, size_t n_elem, double tolerance, int nbits_old, char *config_file) {
+	int max_shave_bits = get_max_shave_bits<T>(RI_params);
 
   // XXX: Check why do we need this?
-  if (mask_zero) {
+	if (RI_params.mask_zero) {
     size_t n_non_zero = 0;
 	for (size_t i = 0; i < n_elem; i++) {
 	  if (std::abs(A[i]) >= EPS) {
@@ -1264,13 +1283,11 @@ int pick_bits_to_shave_binary_search_template(T *A, size_t n_elem, double tolera
     }
   }
 
-  auto RI_params = real_info_params(config_file);
-
   bit_pair_count_calls = 0;
   if (nbits_old == 0) {
-	return binary_search<T>(A, n_elem, tolerance, max_shave_bits/2, max_shave_bits, 0);
+	return binary_search<T>(RI_params, A, n_elem, tolerance, max_shave_bits/2, max_shave_bits, 0);
   } else {
-	return binary_search<T>(A, n_elem, tolerance, nbits_old, max_shave_bits, 0);
+	return binary_search<T>(RI_params, A, n_elem, tolerance, nbits_old, max_shave_bits, 0);
   }
 
   return 0;

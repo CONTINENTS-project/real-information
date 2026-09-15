@@ -9,7 +9,8 @@ int main() {
 	float *shaved_data = new float[n_elements];
 	shave_template<float>(data, n_elements, 4, shaved_data);
 	double *info = new double[32];
-	mutual_information<float>(data, shaved_data, n_elements, info);
+	real_info_params params;
+	mutual_information<float>(params, data, shaved_data, n_elements, info);
 
 	double info_expected[32];
 	read_yaml_list("/work/d446/d446/ab_continents/cesm_workflow/real-information/tests/expected.yaml", "mutual_information", info_expected, 32);
