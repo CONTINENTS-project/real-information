@@ -31,18 +31,20 @@ def pick_bits_to_shave(A, n_elem, tol, current_bits):
     else:
         raise ValueError(f"Unsupported dtype for pick_bits_to_shave: {dtype_str}")
 
-def pick_bits_to_shave_binary_search(A, n_elem, tol, current_bits):
+def pick_bits_to_shave_binary_search(A, n_elem, tol, current_bits, config_path: str = None):
     dtype_str = _infer_dtype(A)
+    # prepare config path as bytes or NULL
+    config_c = None if config_path is None else config_path.encode('utf-8')
     if dtype_str == "float":
         c_func = real_info.pick_bits_to_shave_binary_search_float
-        c_func.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_size_t, ctypes.c_double, ctypes.c_int]
+        c_func.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_size_t, ctypes.c_double, ctypes.c_int, ctypes.c_char_p]
         c_func.restype = ctypes.c_int
-        return c_func(A.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), n_elem, ctypes.c_double(tol), current_bits)
+        return c_func(A.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), n_elem, ctypes.c_double(tol), current_bits, config_c)
     elif dtype_str == "double":
         c_func = real_info.pick_bits_to_shave_binary_search_double
-        c_func.argtypes = [ctypes.POINTER(ctypes.c_double), ctypes.c_size_t, ctypes.c_double, ctypes.c_int]
+        c_func.argtypes = [ctypes.POINTER(ctypes.c_double), ctypes.c_size_t, ctypes.c_double, ctypes.c_int, ctypes.c_char_p]
         c_func.restype = ctypes.c_int
-        return c_func(A.ctypes.data_as(ctypes.POINTER(ctypes.c_double)), n_elem, ctypes.c_double(tol), current_bits)
+        return c_func(A.ctypes.data_as(ctypes.POINTER(ctypes.c_double)), n_elem, ctypes.c_double(tol), current_bits, config_c)
     else:
         raise ValueError(f"Unsupported dtype for pick_bits_to_shave_binary_search: {dtype_str}")
 

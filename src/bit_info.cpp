@@ -89,14 +89,14 @@ extern "C" {
 }
 
 extern "C" {
-	int pick_bits_to_shave_binary_search_float(float *A, size_t n_elem, double tolerance, int nbits_old) {
-		return pick_bits_to_shave_binary_search_template<float>(A, n_elem, tolerance, nbits_old);
+	int pick_bits_to_shave_binary_search_float(float *A, size_t n_elem, double tolerance, int nbits_old, char *config_file) {
+		return pick_bits_to_shave_binary_search_template<float>(A, n_elem, tolerance, nbits_old, config_file);
 	}
 }
 
 extern "C" {
-	int pick_bits_to_shave_binary_search_double(double *A, size_t n_elem, double tolerance, int nbits_old) {
-		return pick_bits_to_shave_binary_search_template<double>(A, n_elem, tolerance, nbits_old);
+	int pick_bits_to_shave_binary_search_double(double *A, size_t n_elem, double tolerance, int nbits_old, char *config_file) {
+		return pick_bits_to_shave_binary_search_template<double>(A, n_elem, tolerance, nbits_old, config_file);
 	}
 }
 

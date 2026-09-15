@@ -1,0 +1,12 @@
+mantissa_only: false
+mask_zero: true
+fixed_point: true
+fixed_point_scale_bits: 10
+
+variables:
+  - var_name: PRECC
+    mantissa_only: true
+    fixed_point_scale_bits: 5
+  - var_name: PM25_SRF
+    mantissa_only: true
+    fixed_point: false

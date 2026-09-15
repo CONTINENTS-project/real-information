@@ -6,18 +6,186 @@
 #include <climits>
 #include <bitset>
 #include <iostream>
+#include <fstream>
+#include <string>
+#include <vector>
+#include <unordered_map>
+#include <type_traits>
 #include <cmath>
 #include <cassert>
 #include <cstring>
 #include <mpi.h>
 
 inline int get_n_exponent_bits(int nbits);
-static const bool mantissa_only = true;
-static const bool mask_zero = true;
+static const bool mantissa_only = false;
+static const bool mask_zero = false;
 static const bool fixed_point = false;
 
 // Set EPS
 static const float EPS = 1e-16;
+
+inline std::string yaml_trim(const std::string &s) {
+	size_t start = s.find_first_not_of(" \t\r\n");
+	if (start == std::string::npos) return "";
+	size_t end = s.find_last_not_of(" \t\r\n");
+	return s.substr(start, end - start + 1);
+}
+
+/**
+ * @brief Reads a single scalar value for a given key from a flat "key: value" YAML file.
+ *
+ * Only supports one "key: value" pair per line; nested/list structures are not handled.
+ * Lines are trimmed of trailing '#' comments before parsing.
+ *
+ * @tparam T Type of the scalar to parse (bool, integral, floating-point, or std::string).
+ * @param config_file Path to the YAML file.
+ * @param key Key to search for.
+ * @param out Pointer to store the parsed value; left unmodified if the key isn't found.
+ */
+template <typename T>
+void read_yaml_scalar(const char *config_file, const std::string &key, T *out, const char *var_name = nullptr) {
+	std::ifstream file(config_file);
+	if (!file.is_open()) {
+		std::cerr << "Could not open config file: " << config_file << "\n";
+		return;
+	}
+
+	// Read all lines and strip comments
+	std::vector<std::string> lines;
+	std::string line;
+	while (std::getline(file, line)) {
+		size_t comment_pos = line.find('#');
+		if (comment_pos != std::string::npos) line = line.substr(0, comment_pos);
+		lines.push_back(line);
+	}
+
+	auto parse_and_set = [&](const std::string &value) {
+		if (value.empty()) return false;
+		if constexpr (std::is_same_v<T, bool>) {
+			*out = (value == "true" || value == "True");
+		} else if constexpr (std::is_integral_v<T>) {
+			*out = static_cast<T>(std::stol(value));
+		} else if constexpr (std::is_floating_point_v<T>) {
+			*out = static_cast<T>(std::stod(value));
+		} else if constexpr (std::is_same_v<T, std::string>) {
+			*out = value;
+		} else {
+			static_assert(!sizeof(T), "Unsupported type for read_yaml_scalar");
+		}
+		return true;
+	};
+
+	auto ltrim = [](const std::string &s) {
+		size_t p = s.find_first_not_of(" \t\r\n");
+		return (p == std::string::npos) ? std::string("") : s.substr(p);
+	};
+
+	auto leading_spaces = [](const std::string &s) {
+		size_t p = s.find_first_not_of(' ');
+		if (p == std::string::npos) return (int)s.size();
+		return (int)p;
+	};
+
+	// If a variable name is provided, attempt to find an override in the variables list
+	if (var_name != nullptr) {
+		// locate 'variables:' line
+		for (size_t i = 0; i < lines.size(); ++i) {
+			if (yaml_trim(lines[i]) == "variables:") {
+				// parse list items
+				size_t j = i + 1;
+				while (j < lines.size()) {
+					// skip empty lines
+					if (yaml_trim(lines[j]).empty()) { ++j; continue; }
+						int indent = leading_spaces(lines[j]);
+						size_t first_non = lines[j].find_first_not_of(" \t");
+						if (first_non == std::string::npos) break;
+					// if this line is not a list item and not indented, variables list ended
+					if (lines[j][first_non] != '-' && first_non == 0) break;
+
+					if (lines[j][first_non] == '-') {
+						// Start a new block. Remove the '-' to simplify parsing
+						std::vector<std::string> block;
+						std::string item = lines[j];
+						item.erase((size_t)first_non, 1);
+						block.push_back(item);
+						++j;
+						// collect indented lines belonging to this block
+						while (j < lines.size()) {
+							int lead2 = leading_spaces(lines[j]);
+								size_t first_non2 = lines[j].find_first_not_of(" \t");
+								if (first_non2 == std::string::npos) { ++j; continue; }
+							// new list item at same indent -> break
+							if (lines[j][first_non2] == '-' && lead2 == indent) break;
+							// top-level unindented -> end of variables list
+							if (first_non2 == 0) break;
+							// otherwise this line belongs to the current block
+							block.push_back(lines[j]);
+							++j;
+						}
+
+						// parse block into key->value pairs
+						std::string block_var_name;
+						std::unordered_map<std::string,std::string> kv;
+						for (const auto &bl : block) {
+							size_t colon_pos = bl.find(':');
+							if (colon_pos == std::string::npos) continue;
+							std::string k = yaml_trim(bl.substr(0, colon_pos));
+							std::string v = yaml_trim(bl.substr(colon_pos + 1));
+							if (!k.empty()) {
+								kv[k] = v;
+								if (k == "var_name") block_var_name = v;
+							}
+						}
+
+						if (!block_var_name.empty() && block_var_name == var_name) {
+							auto it = kv.find(key);
+							if (it != kv.end()) {
+									if (parse_and_set(it->second)) return;
+							}
+							// matching variable found but no override for key: fall through to global lookup
+							break;
+						}
+					} else {
+						// not a list item; move on
+						++j;
+					}
+				}
+				break; // done scanning variables section
+			}
+		}
+	}
+
+	// Fallback: search for global key anywhere in the file
+	for (const auto &ln : lines) {
+		size_t colon_pos = ln.find(':');
+		if (colon_pos == std::string::npos) continue;
+		std::string k = yaml_trim(ln.substr(0, colon_pos));
+		if (k != key) continue;
+		std::string v = yaml_trim(ln.substr(colon_pos + 1));
+		if (parse_and_set(v)) return;
+	}
+
+	std::cerr << "Key \"" << key << "\" not found in config file: " << config_file << "\n";
+}
+
+class real_info_params {
+	private:
+	    char *config_file;
+
+	public:
+	    bool mantissa_only;
+		bool mask_zero;
+		bool fixed_point;
+		int fixed_point_scale_bits;
+	
+		real_info_params(char *config_file) {
+			this->config_file = config_file;
+			read_yaml_scalar(config_file, "mantissa_only", &mantissa_only);
+			read_yaml_scalar(config_file, "mask_zero", &mask_zero);
+			read_yaml_scalar(config_file, "fixed_point", &fixed_point);
+			read_yaml_scalar(config_file, "fixed_point_scale_bits", &fixed_point_scale_bits);
+		}
+};
 
 template <int SB, typename T>
 class FP {
@@ -28,7 +196,7 @@ class FP {
 	int64_t scale_bits;
 
     FP() {
-		if (std::is_same<T,float>() || std::is_same<T,double>()) {
+		if (std::is_same_v<T,float> || std::is_same_v<T,double>) {
 		  scale_bits = std::pow(10, SB);
 		  value = 0;
 		} else {
@@ -38,7 +206,7 @@ class FP {
 	}
 
     FP(T x) {
-		if (std::is_same<T,float>() || std::is_same<T,double>()) {
+		if (std::is_same_v<T,float> || std::is_same_v<T,double>) {
 		  scale_bits = std::pow(10, SB);
 		  value = static_cast<int64_t>(x * scale_bits);
 		} else {
@@ -130,8 +298,7 @@ class bits{
 				FP<10,T> temp;
 				std::memcpy(&temp.value, &bit_set_64, sizeof(int64_t));
 				result = temp.convert_back();
-			}
-			if (std::is_same_v<T, float>) {
+			} else if (std::is_same_v<T, float>) {
 				std::memcpy(&result, &bit_set_32, sizeof(float));
 			} else if (std::is_same_v<T, double>) {
 				std::memcpy(&result, &bit_set_64, sizeof(double));
@@ -144,7 +311,10 @@ class bits{
 		 * @param n Number of least-significant bits to shave.
 		 */
 		void shave(int n) {
-			if (std::is_same_v<T, float>) {
+			if (fixed_point) {
+				uint64_t mask = 0xFFFFFFFFFFFFFFFF << n;
+				bit_set_64 &= mask;
+		    } else if (std::is_same_v<T, float>) {
 				uint32_t mask = 0xFFFFFFFF << n;
 				bit_set_32 &= mask;
 			} else if (std::is_same_v<T, double>) {
@@ -158,7 +328,10 @@ class bits{
 		 * @param n Number of least-significant bits to set.
 		 */
 		void set(int n) {
-			if (std::is_same_v<T, float>) {
+			if (fixed_point) {
+				uint64_t mask = 0xFFFFFFFFFFFFFFFF << n;
+				bit_set_64 |= ~mask;
+		    } else if (std::is_same_v<T, float>) {
 				uint32_t mask = 0xFFFFFFFF << n;
 				bit_set_32 |= ~mask;
 			} else if (std::is_same_v<T, double>) {
@@ -173,7 +346,12 @@ class bits{
 		 */
 		void halfshave(int n) {
 			int nbits = sizeof(T) * CHAR_BIT;
-			if (std::is_same_v<T, float>) {
+			if (fixed_point) {
+				uint64_t keep_mask = 0xFFFFFFFFFFFFFFFF << n;
+				bit_set_64 &= keep_mask;
+				uint64_t round_up_mask = 0x8000000000000000 >> (nbits - n - 1);
+				bit_set_64 |= round_up_mask;
+		    } else if (std::is_same_v<T, float>) {
 				uint32_t keep_mask = 0xFFFFFFFF << n;
 				bit_set_32 &= keep_mask;
 				uint32_t round_up_mask = 0x80000000 >> (nbits - n - 1);
@@ -197,7 +375,17 @@ class bits{
 			int shift = mantissa_bits - keepbits - 1;
 			shift -= (keepbits == mantissa_bits) ? 1 : 0;
 
-			if (std::is_same_v<T, float>) {
+			if (fixed_point) {
+				uint64_t upper_mask;
+				if (nbits - n + 1 >= 64) {
+					upper_mask = 0x0000000000000000; // bitshift leads to undefined behaviour if greater than number of bits, and what we really want are all zeros
+				} else {
+				 	upper_mask = 0xFFFFFFFFFFFFFFFF >> (nbits - n + 1);
+				}
+				uint64_t lower_mask = 0xFFFFFFFFFFFFFFFF << n;
+				uint64_t temp_bit_set_64 = bit_set_64 + upper_mask + ((bit_set_64 >> shift) & 1);
+				bit_set_64 = temp_bit_set_64 & lower_mask;
+		    } else if (std::is_same_v<T, float>) {
 				uint32_t upper_mask;
 				if (nbits - n + 1 >= 32) {
 					upper_mask = 0x00000000; // bitshift leads to undefined behaviour if greater than number of bits, and what we really want are all zeros
@@ -352,10 +540,16 @@ size_t bit_count_bits(T *A, size_t n_elem, int i, size_t *non_zero) {
 	*non_zero = 0;
 	for (size_t j = 0; j < n_elem; j++) {
 		if (mask_zero && std::abs(A[j]) < EPS) {
+			assert(mask_zero);
+			assert(std::abs(A[j]) < EPS);
 			continue;
 		}
 		bits<T> b(A[j]);
-		if (std::is_same_v<T, float>) {
+		if (fixed_point) {
+			uint64_t mask = 0x0000000000000001;
+			mask <<= i;
+			count += (b.bit_set_64 & mask) ? 1 : 0;
+		} else if (std::is_same_v<T, float>) {
 			uint32_t mask = 0x00000001;
 			mask <<= i;
 			count += (b.bit_set_32 & mask) ? 1 : 0;
@@ -456,7 +650,12 @@ template <typename T>
 void bit_pair_count_bits(bits<T> a, bits<T> b, int j, int *p) {
 	int bit_a, bit_b;
 
-	if (std::is_same_v<T, float>) {
+	if (fixed_point) {
+		uint64_t mask = 0x0000000000000001;
+		mask <<= j;
+		bit_a = (a.bit_set_64 & mask) ? 1 : 0;
+		bit_b = (b.bit_set_64 & mask) ? 1 : 0;
+	} else if (std::is_same_v<T, float>) {
 		uint32_t mask = 0x00000001;
 		mask <<= j;
 		bit_a = (a.bit_set_32 & mask) ? 1 : 0;
@@ -923,7 +1122,10 @@ int pick_bits_to_shave_template(T *A, size_t n_elem, double tolerance, int nbits
   int max_bits = sizeof(T) * CHAR_BIT; 
   T *s = new T[n_elem];
   int start_bit;
-  if constexpr (std::is_same_v<T, float>) { 
+  if (fixed_point) {
+	max_bits = sizeof(int64_t) * CHAR_BIT;
+	start_bit = max_bits - 1;
+  } else if constexpr (std::is_same_v<T, float>) { 
     start_bit = max_bits - n_exponent_bits_float - 1;
   } else if constexpr (std::is_same_v<T, double>) {
     start_bit = max_bits - n_exponent_bits_double - 1;
@@ -983,7 +1185,10 @@ int pick_bits_to_shave_template(T *A, size_t n_elem, double tolerance, int nbits
 template <typename T>
 int get_max_shave_bits() {
   int max_bits = sizeof(T) * CHAR_BIT; 
-  if constexpr (std::is_same_v<T, float>) { 
+  if (fixed_point) {
+	max_bits = sizeof(int64_t) * CHAR_BIT;
+	return max_bits - 1;
+  } else if constexpr (std::is_same_v<T, float>) { 
     return max_bits - n_exponent_bits_float - 1;
   } else if constexpr (std::is_same_v<T, double>) {
     return max_bits - n_exponent_bits_double - 1;
@@ -1043,7 +1248,7 @@ int binary_search(T *A, size_t n_elem, double tolerance, int start_bit, int high
  * @return The number of bits to shave from each element in the array.
  */
 template <typename T>
-int pick_bits_to_shave_binary_search_template(T *A, size_t n_elem, double tolerance, int nbits_old) {
+int pick_bits_to_shave_binary_search_template(T *A, size_t n_elem, double tolerance, int nbits_old, char *config_file) {
   int max_shave_bits = get_max_shave_bits<T>();
 
   // XXX: Check why do we need this?
@@ -1058,6 +1263,8 @@ int pick_bits_to_shave_binary_search_template(T *A, size_t n_elem, double tolera
       return 0;
     }
   }
+
+  auto RI_params = real_info_params(config_file);
 
   bit_pair_count_calls = 0;
   if (nbits_old == 0) {
