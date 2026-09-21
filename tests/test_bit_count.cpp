@@ -17,7 +17,8 @@ int main() {
 		test_assert(bit_counts[i] == bit_counts_expected[i], __FILE__, __LINE__, message);
 	}
 
-	real_info_params params;
+	std::string config_file = "/glade/work/aborissov/cesm_workflow/real-information/tests/test_yaml_override.yaml";
+	real_info_params params(config_file.data());
 	bit_count_bits<float>(params, data, n_elements, bit_counts, &n_non_zero);
 	for (int i = 0; i < 32; i++) {
 		std::string message = "Bit count (bits class) for bit " + std::to_string(i) + " does not match expected value " + std::to_string(bit_counts[i]) + " != " + std::to_string(bit_counts_expected[i]);

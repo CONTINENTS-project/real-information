@@ -178,8 +178,8 @@ class real_info_params {
 		bool fixed_point;
 		int fixed_point_scale_bits;
 	
-		real_info_params()
-			: config_file(nullptr), mantissa_only(false), mask_zero(false), fixed_point(false), fixed_point_scale_bits(10) {}
+		//real_info_params()
+		//	: config_file(nullptr), mantissa_only(false), mask_zero(false), fixed_point(false), fixed_point_scale_bits(10) {}
 
 		real_info_params(char *config_file) {
 			this->config_file = config_file;

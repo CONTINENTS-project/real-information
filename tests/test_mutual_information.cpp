@@ -9,7 +9,8 @@ int main() {
 	float *shaved_data = new float[n_elements];
 	shave_template<float>(data, n_elements, 4, shaved_data);
 	double *info = new double[32];
-	real_info_params params;
+	std::string config_file = "/glade/work/aborissov/cesm_workflow/real-information/tests/test_yaml_override.yaml";
+	real_info_params params(config_file.data());
 	mutual_information<float>(params, data, shaved_data, n_elements, info);
 
 	double info_expected[32];

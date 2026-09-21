@@ -10,7 +10,8 @@ int main() {
 	std::memcpy(sorted_data, data, n_elements * sizeof(float));
 	std::sort(sorted_data, sorted_data + n_elements);
 	double *info = new double[32];
-	real_info_params params;
+	std::string config_file = "/glade/work/aborissov/cesm_workflow/real-information/tests/test_yaml_override.yaml";
+	real_info_params params(config_file.data());
 	bitwise_real_information<float>(params, sorted_data, n_elements, info);
 
 	double info_expected[32];

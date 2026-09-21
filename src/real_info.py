@@ -1,11 +1,26 @@
 import ctypes
 import os
+from pathlib import Path
 import numpy as np
 
 # Load the compiled C library
-#_lib_path = os.path.join(os.path.dirname(__file__), 'bit_info.so')
-_lib_path = "/work/d446/d446/ab_continents/cesm_workflow/install/real-info/lib/bit_info.so"
-real_info = ctypes.CDLL(_lib_path)
+_DEFAULT_LIB_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "install"
+    / "real-information"
+    / "lib"
+    / "bit_info.so"
+)
+
+_lib_path = Path(os.environ.get("REAL_INFO_LIB_PATH", _DEFAULT_LIB_PATH))
+
+if not _lib_path.is_file():
+    raise FileNotFoundError(
+        f"Cannot find bit_info shared library at {_lib_path}. "
+        "Set REAL_INFO_LIB_PATH to its full path."
+    )
+
+real_info = ctypes.CDLL(str(_lib_path))
 
 def _infer_dtype(A):
     if hasattr(A, "dtype"):
@@ -16,50 +31,48 @@ def _infer_dtype(A):
             return "double"
     return ValueError(f"Unable to infer dtype")
 
-def pick_bits_to_shave(A, n_elem, tol, current_bits):
+def pick_bits_to_shave(A, n_elem, tol, current_bits, config_path):
     dtype_str = _infer_dtype(A)
     if dtype_str == "float":
         c_func = real_info.pick_bits_to_shave_float
-        c_func.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_size_t, ctypes.c_double, ctypes.c_int]
+        c_func.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_size_t, ctypes.c_double, ctypes.c_int, ctypes.c_char_p]
         c_func.restype = ctypes.c_int
-        return c_func(A.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), n_elem, ctypes.c_double(tol), current_bits)
+        return c_func(A.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), n_elem, ctypes.c_double(tol), current_bits, config_path.encode('utf-8'))
     elif dtype_str == "double":
         c_func = real_info.pick_bits_to_shave_double
-        c_func.argtypes = [ctypes.POINTER(ctypes.c_double), ctypes.c_size_t, ctypes.c_double, ctypes.c_int]
+        c_func.argtypes = [ctypes.POINTER(ctypes.c_double), ctypes.c_size_t, ctypes.c_double, ctypes.c_int, ctypes.c_char_p]
         c_func.restype = ctypes.c_int
-        return c_func(A.ctypes.data_as(ctypes.POINTER(ctypes.c_double)), n_elem, ctypes.c_double(tol), current_bits)
+        return c_func(A.ctypes.data_as(ctypes.POINTER(ctypes.c_double)), n_elem, ctypes.c_double(tol), current_bits, config_path.encode('utf-8'))
     else:
         raise ValueError(f"Unsupported dtype for pick_bits_to_shave: {dtype_str}")
 
-def pick_bits_to_shave_binary_search(A, n_elem, tol, current_bits, config_path: str = None):
+def pick_bits_to_shave_binary_search(A, n_elem, tol, current_bits, config_path):
     dtype_str = _infer_dtype(A)
-    # prepare config path as bytes or NULL
-    config_c = None if config_path is None else config_path.encode('utf-8')
     if dtype_str == "float":
         c_func = real_info.pick_bits_to_shave_binary_search_float
         c_func.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_size_t, ctypes.c_double, ctypes.c_int, ctypes.c_char_p]
         c_func.restype = ctypes.c_int
-        return c_func(A.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), n_elem, ctypes.c_double(tol), current_bits, config_c)
+        return c_func(A.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), n_elem, ctypes.c_double(tol), current_bits, config_path.encode('utf-8'))
     elif dtype_str == "double":
         c_func = real_info.pick_bits_to_shave_binary_search_double
         c_func.argtypes = [ctypes.POINTER(ctypes.c_double), ctypes.c_size_t, ctypes.c_double, ctypes.c_int, ctypes.c_char_p]
         c_func.restype = ctypes.c_int
-        return c_func(A.ctypes.data_as(ctypes.POINTER(ctypes.c_double)), n_elem, ctypes.c_double(tol), current_bits, config_c)
+        return c_func(A.ctypes.data_as(ctypes.POINTER(ctypes.c_double)), n_elem, ctypes.c_double(tol), current_bits, config_path.encode('utf-8'))
     else:
         raise ValueError(f"Unsupported dtype for pick_bits_to_shave_binary_search: {dtype_str}")
 
-def presereved_information(A, B, n_elem):
+def presereved_information(A, B, n_elem, config_path):
     dtype_str = _infer_dtype(A)
     if dtype_str == "float":
-        c_func = real_info.pick_bits_to_shave_binary_search_float
-        c_func.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.c_size_t]
+        c_func = real_info.preserved_information_float
+        c_func.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.c_size_t, ctypes.c_char_p]
         c_func.restype = ctypes.c_double
-        return c_func(A.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), B.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), n_elem)
+        return c_func(A.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), B.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), n_elem, config_path.encode('utf-8'))
     elif dtype_str == "double":
-        c_func = real_info.pick_bits_to_shave_binary_search_double
-        c_func.argtypes = [ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double), ctypes.c_size_t]
+        c_func = real_info.preserved_information_double
+        c_func.argtypes = [ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double), ctypes.c_size_t, ctypes.c_char_p]
         c_func.restype = ctypes.c_double
-        return c_func(A.ctypes.data_as(ctypes.POINTER(ctypes.c_double)), B.ctypes.data_as(ctypes.POINTER(ctypes.c_double)), n_elem)
+        return c_func(A.ctypes.data_as(ctypes.POINTER(ctypes.c_double)), B.ctypes.data_as(ctypes.POINTER(ctypes.c_double)), n_elem, config_path.encode('utf-8'))
     else:
         raise ValueError(f"Unsupported dtype for preserved_information: {dtype_str}")
 
