@@ -65,38 +65,44 @@ extern "C" {
 }
 
 extern "C" {
-	double preserved_information_float(float *A, float *B, size_t n_elem) {
-		return preserved_information_template<float>(A, B, n_elem);
+	double preserved_information_float(float *A, float *B, size_t n_elem, char *config_file) {
+		real_info_params params(config_file);
+		return preserved_information_template<float>(params, A, B, n_elem);
 	}
 }
 
 extern "C" {
-	double preserved_information_double(double *A, double *B, size_t n_elem) {
-		return preserved_information_template<double>(A, B, n_elem);
+	double preserved_information_double(double *A, double *B, size_t n_elem, char *config_file) {
+		real_info_params params(config_file);
+		return preserved_information_template<double>(params, A, B, n_elem);
 	}
 }
 
 extern "C" {
-	int pick_bits_to_shave_float(float *A, size_t n_elem, double tolerance, int nbits_old) {
-		return pick_bits_to_shave_template<float>(A, n_elem, tolerance, nbits_old);
+	int pick_bits_to_shave_float(float *A, size_t n_elem, double tolerance, int nbits_old, char *config_file) {
+		real_info_params params(config_file);
+		return pick_bits_to_shave_template<float>(params, A, n_elem, tolerance, nbits_old);
 	}
 }
 
 extern "C" {
-	int pick_bits_to_shave_double(double *A, size_t n_elem, double tolerance, int nbits_old) {
-		return pick_bits_to_shave_template<double>(A, n_elem, tolerance, nbits_old);
+	int pick_bits_to_shave_double(double *A, size_t n_elem, double tolerance, int nbits_old, char *config_file) {
+		real_info_params params(config_file);
+		return pick_bits_to_shave_template<double>(params, A, n_elem, tolerance, nbits_old);
 	}
 }
 
 extern "C" {
-	int pick_bits_to_shave_binary_search_float(float *A, size_t n_elem, double tolerance, int nbits_old) {
-		return pick_bits_to_shave_binary_search_template<float>(A, n_elem, tolerance, nbits_old);
+	int pick_bits_to_shave_binary_search_float(float *A, size_t n_elem, double tolerance, int nbits_old, char *config_file) {
+		real_info_params params(config_file);
+		return pick_bits_to_shave_binary_search_template<float>(params, A, n_elem, tolerance, nbits_old, config_file);
 	}
 }
 
 extern "C" {
-	int pick_bits_to_shave_binary_search_double(double *A, size_t n_elem, double tolerance, int nbits_old) {
-		return pick_bits_to_shave_binary_search_template<double>(A, n_elem, tolerance, nbits_old);
+	int pick_bits_to_shave_binary_search_double(double *A, size_t n_elem, double tolerance, int nbits_old, char *config_file) {
+		real_info_params params(config_file);
+		return pick_bits_to_shave_binary_search_template<double>(params, A, n_elem, tolerance, nbits_old, config_file);
 	}
 }
 
