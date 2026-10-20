@@ -66,42 +66,42 @@ extern "C" {
 
 extern "C" {
 	double preserved_information_float(float *A, float *B, size_t n_elem, char *config_file) {
-		real_info_params params(config_file);
+		real_info_params<float> params(config_file, A, n_elem);
 		return preserved_information_template<float>(params, A, B, n_elem);
 	}
 }
 
 extern "C" {
 	double preserved_information_double(double *A, double *B, size_t n_elem, char *config_file) {
-		real_info_params params(config_file);
+		real_info_params<double> params(config_file, A, n_elem);
 		return preserved_information_template<double>(params, A, B, n_elem);
 	}
 }
 
 extern "C" {
 	int pick_bits_to_shave_float(float *A, size_t n_elem, double tolerance, int nbits_old, char *config_file) {
-		real_info_params params(config_file);
+		real_info_params<float> params(config_file, A, n_elem);
 		return pick_bits_to_shave_template<float>(params, A, n_elem, tolerance, nbits_old);
 	}
 }
 
 extern "C" {
 	int pick_bits_to_shave_double(double *A, size_t n_elem, double tolerance, int nbits_old, char *config_file) {
-		real_info_params params(config_file);
+		real_info_params<double> params(config_file, A, n_elem);
 		return pick_bits_to_shave_template<double>(params, A, n_elem, tolerance, nbits_old);
 	}
 }
 
 extern "C" {
 	int pick_bits_to_shave_binary_search_float(float *A, size_t n_elem, double tolerance, int nbits_old, char *config_file) {
-		real_info_params params(config_file);
+		real_info_params<float> params(config_file, A, n_elem);
 		return pick_bits_to_shave_binary_search_template<float>(params, A, n_elem, tolerance, nbits_old, config_file);
 	}
 }
 
 extern "C" {
 	int pick_bits_to_shave_binary_search_double(double *A, size_t n_elem, double tolerance, int nbits_old, char *config_file) {
-		real_info_params params(config_file);
+		real_info_params<double> params(config_file, A, n_elem);
 		return pick_bits_to_shave_binary_search_template<double>(params, A, n_elem, tolerance, nbits_old, config_file);
 	}
 }

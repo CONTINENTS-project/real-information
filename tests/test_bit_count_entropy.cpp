@@ -7,8 +7,8 @@ int main() {
 	read_input_data(filename, data, n_elements);
 
 	double H[32];
-	std::string config_file = "/glade/work/aborissov/cesm_workflow/real-information/tests/test_yaml_override.yaml";
-	real_info_params params(config_file.data());
+	std::string config_file = "/work/d446/d446/ab_continents/cesm_workflow/real-information/tests/test_yaml_override.yaml";
+	real_info_params<float> params(config_file.data(), data, n_elements);
 	bit_count_entropy<float>(params, data, n_elements, H);
 
 	double H_expected[32];

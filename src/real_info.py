@@ -7,7 +7,7 @@ import numpy as np
 _DEFAULT_LIB_PATH = (
     Path(__file__).resolve().parents[2]
     / "install"
-    / "real-information"
+    / "real-info"
     / "lib"
     / "bit_info.so"
 )

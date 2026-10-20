@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <concepts>
 #include <climits>
+#include <limits>
 #include <bitset>
 #include <iostream>
 #include <fstream>
@@ -17,9 +18,6 @@
 #include <mpi.h>
 
 inline int get_n_exponent_bits(int nbits);
-static const bool mantissa_only = false;
-static const bool mask_zero = false;
-static const bool fixed_point = false;
 
 // Set EPS
 static const float EPS = 1e-16;
@@ -168,6 +166,10 @@ void read_yaml_scalar(const char *config_file, const std::string &key, T *out, c
 	std::cerr << "Key \"" << key << "\" not found in config file: " << config_file << "\n";
 }
 
+template <typename T>
+void get_fixed_point_init_params(T *x, size_t n_elem, T *scale_factor, T *offset);
+
+template <typename T>
 class real_info_params {
 	private:
 	    char *config_file;
@@ -176,20 +178,40 @@ class real_info_params {
 	    bool mantissa_only;
 		bool mask_zero;
 		bool fixed_point;
-		int fixed_point_scale_bits;
+		T offset;
+		T scale_factor;
 	
-		//real_info_params()
-		//	: config_file(nullptr), mantissa_only(false), mask_zero(false), fixed_point(false), fixed_point_scale_bits(10) {}
-
 		real_info_params(char *config_file) {
 			this->config_file = config_file;
 			read_yaml_scalar(config_file, "mantissa_only", &mantissa_only);
 			read_yaml_scalar(config_file, "mask_zero", &mask_zero);
 			read_yaml_scalar(config_file, "fixed_point", &fixed_point);
-			read_yaml_scalar(config_file, "fixed_point_scale_bits", &fixed_point_scale_bits);
+			if (fixed_point) {
+				// Abort since we didn't get any data to base our offset and scale factor on
+				std::cerr << "Error: No data provided for fixed-point initialization.\n";
+				std::abort();
+			}
+		}
+
+		real_info_params(char *config_file, T *data, size_t n_elem) {
+			this->config_file = config_file;
+			read_yaml_scalar(config_file, "mantissa_only", &mantissa_only);
+			read_yaml_scalar(config_file, "mask_zero", &mask_zero);
+			read_yaml_scalar(config_file, "fixed_point", &fixed_point);
+			if (fixed_point) {
+				get_fixed_point_init_params(data, n_elem, &scale_factor, &offset);
+			}
 		}
 };
 
+/* 
+  Fixed-point arithmetic class modelled on Alex Pinard's implementation. 
+
+  For a given value, x, in a dataset the fixed point value is represented by
+  int64_t((x - x_min)/(x_max - x_min) * 2^64 - 1). 
+
+  In this implementation, scale_factor = 1/(x_max - x_min), offset = x_min.
+*/
 template <typename T>
 class FP {
   public:
@@ -197,21 +219,21 @@ class FP {
 
 	//static constexpr int64_t scale_bits = 1 << SB;
 	int64_t scale_bits;
+	T scale_factor;
+	T offset;
 
-    FP(int SB) {
+    FP(T scale_factor, T offset) : scale_factor(scale_factor), offset(offset) {
 		if (std::is_same_v<T,float> || std::is_same_v<T,double>) {
-		  scale_bits = std::pow(10, SB);
-		  value = 0;
+		  value = static_cast<int64_t>(-offset * scale_factor * std::numeric_limits<int64_t>::max());
 		} else {
 		  std::cout << "Expected float or double type\n";
 		  std::abort();
 		}
 	}
 
-    FP(int SB, T x) {
+    FP(T scale_factor, T offset, T x) : scale_factor(scale_factor), offset(offset) {
 		if (std::is_same_v<T,float> || std::is_same_v<T,double>) {
-		  scale_bits = std::pow(10, SB);
-		  value = static_cast<int64_t>(x * scale_bits);
+		  value = static_cast<int64_t>((x - offset) * scale_factor * std::numeric_limits<int64_t>::max());
 		} else {
 		  std::cout << "Expected float or double type\n";
 		  std::abort();
@@ -219,38 +241,47 @@ class FP {
 	}
 
 	T convert_back() {
-		return static_cast<T>(value) / scale_bits;
+		return static_cast<T>(value) / (scale_factor * std::numeric_limits<int64_t>::max()) + offset;
 	}
 
 	FP operator+(const FP &other) {
 		FP<T> return_value;
-		return_value.value = value + other.value;
+		return_value.value = value + other.value + static_cast<int64_t>(offset * scale_factor * std::numeric_limits<int64_t>::max());
 		return return_value;
 	}
 
 	FP operator-(const FP &other) {
 		FP<T> return_value;
-		return_value.value = value - other.value;
+		return_value.value = value - other.value - static_cast<int64_t>(offset * scale_factor * std::numeric_limits<int64_t>::max());
 		return return_value;
 	}
 
-	FP operator*(const FP &other) {
-		FP<T> return_value;
-		return_value.value = value * other.value / scale_bits; // When multiplying we have two factors of scale_bits, so need to remove one.
-		return return_value;
-	}
+	// I don't *think* we need these
+	//FP operator*(const FP &other) {
+	//	FP<T> return_value;
+	//	return_value.value = value * other.value / scale_factor; // When multiplying we have two factors of scale_bits, so need to remove one.
+	//	return return_value;
+	//}
 
-	FP operator/(const FP &other) {
-		FP<T> return_value;
-		return_value.value = (value * scale_bits) / other.value; // When dividing we have two factors of scale_bits, so need to remove one.
-		return return_value;
-	}
+	//FP operator/(const FP &other) {
+	//	FP<T> return_value;
+	//	return_value.value = (value * scale_bits) / other.value; // When dividing we have two factors of scale_bits, so need to remove one.
+	//	return return_value;
+	//}
 
 };
 
+template <typename T>
+void get_fixed_point_init_params(T *x, size_t n_elem, T *scale_factor, T *offset) {
+	T x_min = *std::min_element(x, x + n_elem);
+	T x_max = *std::max_element(x, x + n_elem);
+	*scale_factor = 1.0 / (x_max - x_min);
+	*offset = x_min;
+}
 
-void get_start_end_bits(int n_bits, int *start, int *end) {
-	if (mantissa_only) {
+template <typename T>
+void get_start_end_bits(const real_info_params<T> &params, int n_bits, int *start, int *end) {
+	if (params.mantissa_only) {
 		if (n_bits == 32) {
 			*end = 23;
 		} else if (n_bits == 64) {
@@ -273,7 +304,7 @@ template<typename T>
  */
 class bits{
 	private:
-		const real_info_params &params_;
+		const real_info_params<T> &params_;
 
 	public:
 		uint32_t bit_set_32;
@@ -284,9 +315,9 @@ class bits{
 		 * @param RI_params Real information parameters.
 		 * @param x Input value.
 		 */
-		bits(const real_info_params &params, T x) : params_(params) {
+		bits(const real_info_params<T> &params, T x) : params_(params) {
 			if (params_.fixed_point) {
-				FP<T> x_fp(params_.fixed_point_scale_bits, x);
+				FP<T> x_fp(params_.scale_factor, params_.offset, x);
 				std::memcpy(&bit_set_64, &x_fp.value, sizeof(int64_t));
 			} else if (std::is_same_v<T, float>) {
 				std::memcpy(&bit_set_32, &x, sizeof(float));
@@ -302,7 +333,7 @@ class bits{
 		T convert_back() {
 			T result;
 			if (params_.fixed_point) {
-				FP<T> temp(params_.fixed_point_scale_bits);
+				FP<T> temp(params_.scale_factor, params_.offset);
 				std::memcpy(&temp.value, &bit_set_64, sizeof(int64_t));
 				result = temp.convert_back();
 			} else if (std::is_same_v<T, float>) {
@@ -425,7 +456,7 @@ class bits{
  * @param shaved Output array of shaved values.
  */
 template <typename T>
-void shave_bits(const real_info_params &RI_params, T *A, size_t n_elem, int n, T *shaved) {
+void shave_bits(const real_info_params<T> &RI_params, T *A, size_t n_elem, int n, T *shaved) {
 	for (size_t i = 0; i < n_elem; i++) {
 		bits<T> b(RI_params, A[i]);
 		b.shave(n);
@@ -442,7 +473,7 @@ void shave_bits(const real_info_params &RI_params, T *A, size_t n_elem, int n, T
  * @param halfshaved Output array of half-shaved values.
  */
 template <typename T>
-void halfshave_bits(const real_info_params &RI_params, T *A, size_t n_elem, int n, T *halfshaved) {
+void halfshave_bits(const real_info_params<T> &RI_params, T *A, size_t n_elem, int n, T *halfshaved) {
 	for (size_t i = 0; i < n_elem; i++) {
 		bits<T> b(RI_params, A[i]);
 		b.halfshave(n);
@@ -459,7 +490,7 @@ void halfshave_bits(const real_info_params &RI_params, T *A, size_t n_elem, int 
  * @param bit_rounding_result Output array of rounded values.
  */
 template <typename T>
-void bit_rounding_bits(const real_info_params &RI_params, T *A, size_t n_elem, int n, T *bit_rounding_result) {
+void bit_rounding_bits(const real_info_params<T> &RI_params, T *A, size_t n_elem, int n, T *bit_rounding_result) {
 	for (size_t i = 0; i < n_elem; i++) {
 		bits<T> b(RI_params, A[i]);
 		b.round(n);
@@ -476,7 +507,7 @@ void bit_rounding_bits(const real_info_params &RI_params, T *A, size_t n_elem, i
  * @param set Output array of set values.
  */
 template <typename T>
-void set_bits(const real_info_params &RI_params, T *A, size_t n_elem, int n, T *set) {
+void set_bits(const real_info_params<T> &RI_params, T *A, size_t n_elem, int n, T *set) {
 	for (size_t i = 0; i < n_elem; i++) {
 		bits<T> b(RI_params, A[i]);
 		b.set(n);
@@ -520,12 +551,12 @@ inline int get_n_exponent_bits(int nbits) {
  * @param i Bit position to count (0 for least significant bit).
  */
 template <typename T>
-size_t bit_count(T *A, size_t n_elem, int i, size_t *non_zero) {
+size_t bit_count(const real_info_params<T> &RI_params, T *A, size_t n_elem, int i, size_t *non_zero) {
 	size_t count = 0;
 
 	*non_zero = 0;
 	for (size_t j = 0; j < n_elem; j++) {
-		if (mask_zero && std::abs(A[j]) < EPS) {
+		if (RI_params.mask_zero && std::abs(A[j]) < EPS) {
 			continue;
 		}
 		auto *b0 = reinterpret_cast<typename HELP<T>::type*>(&A[j]);
@@ -546,7 +577,7 @@ size_t bit_count(T *A, size_t n_elem, int i, size_t *non_zero) {
  * @return The count of bits set to 1 in the specified bit position across the array.
  */
 template <typename T>
-size_t bit_count_bits(const real_info_params &RI_params, T *A, size_t n_elem, int i, size_t *non_zero) {
+size_t bit_count_bits(const real_info_params<T> &RI_params, T *A, size_t n_elem, int i, size_t *non_zero) {
 	size_t count = 0;
 	*non_zero = 0;
 	for (size_t j = 0; j < n_elem; j++) {
@@ -581,19 +612,19 @@ size_t bit_count_bits(const real_info_params &RI_params, T *A, size_t n_elem, in
  * @param c Output array to store the count of bits set to 1 for each bit position.
  */
 template <typename T>
-void bit_count(T *A, size_t n_elem, size_t *c, size_t *non_zero) {
+void bit_count(const real_info_params<T> &RI_params, T *A, size_t n_elem, size_t *c, size_t *non_zero) {
 	int n_bits = sizeof(A[0]) * CHAR_BIT;
 	int start_bit, end_bit;
-	get_start_end_bits(n_bits, &start_bit, &end_bit);
+	get_start_end_bits<T>(RI_params, n_bits, &start_bit, &end_bit);
 	for (int i = start_bit; i < end_bit; i++) {
-		c[i - start_bit] = bit_count(A, n_elem, i, non_zero);
+		c[i - start_bit] = bit_count(RI_params, A, n_elem, i, non_zero);
 	}
 }
 template <typename T>
-void bit_count_bits(const real_info_params &RI_params, T *A, size_t n_elem, size_t *c, size_t *non_zero) {
+void bit_count_bits(const real_info_params<T> &RI_params, T *A, size_t n_elem, size_t *c, size_t *non_zero) {
 	int n_bits = sizeof(A[0]) * CHAR_BIT;
 	int start_bit, end_bit;
-	get_start_end_bits(n_bits, &start_bit, &end_bit);
+	get_start_end_bits<T>(RI_params, n_bits, &start_bit, &end_bit);
 	for (int i = start_bit; i < end_bit; i++) {
 		c[i - start_bit] = bit_count_bits(RI_params, A, n_elem, i, non_zero);
 	}
@@ -657,7 +688,7 @@ double bitpattern_entropy(T *A, size_t n_elem) {
  * @param p Output array to store the counts of each bit pair.
  */
 template <typename T>
-void bit_pair_count_bits(const real_info_params &RI_params, const bits<T> &a, const bits<T> &b, int j, int *p) {
+void bit_pair_count_bits(const real_info_params<T> &RI_params, const bits<T> &a, const bits<T> &b, int j, int *p) {
 	int bit_a, bit_b;
 
 	if (RI_params.fixed_point) {
@@ -698,11 +729,11 @@ void bit_pair_count_bits(const real_info_params &RI_params, const bits<T> &a, co
  * @param pair_counts Pointer to an array to store the counts of each bit pair.
  */
 template <typename T>
-void bit_pair_count_bits(const real_info_params &RI_params, T *A, T *B, size_t n_elem, size_t *pair_counts, size_t *non_zero) {
+void bit_pair_count_bits(const real_info_params<T> &RI_params, T *A, T *B, size_t n_elem, size_t *pair_counts, size_t *non_zero) {
 	bit_pair_count_calls += 1;
 	const int n_bits = sizeof(T) * CHAR_BIT;
 	int start_bit, end_bit;
-	get_start_end_bits(n_bits, &start_bit, &end_bit);
+	get_start_end_bits<T>(RI_params, n_bits, &start_bit, &end_bit);
 	int total_bits = end_bit - start_bit;
 	*non_zero = 0;
 	#pragma omp parallel for reduction(+:pair_counts[:total_bits * n_joint_counts])
@@ -755,18 +786,19 @@ void bit_pair_count(std::bitset<n_bits> a, std::bitset<n_bits> b, int j, int *p)
  * @param B Pointer to the second array.
  * @param n_elem The number of elements in the arrays A and B.
  * @param pair_counts Pointer to an array to store the counts of each bit pair.
+ * @param RI_params The parameters for the real information calculation.
  */
 template <typename T>
-void bit_pair_count(T *A, T *B, size_t n_elem, size_t *pair_counts, size_t *non_zero) {
+void bit_pair_count(const real_info_params<T> &RI_params, T *A, T *B, size_t n_elem, size_t *pair_counts, size_t *non_zero) {
 	*non_zero = 0;
 	bit_pair_count_calls += 1;
 	const int n_bits = sizeof(T) * CHAR_BIT;
 	int start_bit, end_bit;
-	get_start_end_bits(n_bits, &start_bit, &end_bit);
+	get_start_end_bits<T>(RI_params, n_bits, &start_bit, &end_bit);
 	int total_bits = end_bit - start_bit;
 	#pragma omp parallel for reduction(+:pair_counts[:total_bits * n_joint_counts])
 	for (size_t i = 0; i < n_elem; i++) {
-		if (mask_zero && std::abs(A[i]) < EPS && std::abs(B[i]) < EPS) {
+		if (RI_params.mask_zero && std::abs(A[i]) < EPS && std::abs(B[i]) < EPS) {
 			continue;
 		}
 		auto a = reinterpret_cast<typename HELP<T>::type *>(&A[i]);
@@ -795,10 +827,10 @@ void bit_pair_count(T *A, T *B, size_t n_elem, size_t *pair_counts, size_t *non_
  * @param H Pointer to an array to store the entropy of each bit position.
  */
 template <typename T>
-void bit_count_entropy(const real_info_params &RI_params, T *A, size_t n_elem, double *H) {
+void bit_count_entropy(const real_info_params<T> &RI_params, T *A, size_t n_elem, double *H) {
 	const int n_bits = sizeof(A[0]) * CHAR_BIT;
 	int start_bit, end_bit;
-	get_start_end_bits(n_bits, &start_bit, &end_bit);
+	get_start_end_bits<T>(RI_params, n_bits, &start_bit, &end_bit);
 	int total_bits = end_bit - start_bit;
 	size_t c[total_bits];
 	size_t n_non_zero;
@@ -1003,10 +1035,10 @@ void groom_template(T *a, size_t n_elem, int n, T *groomed) {
  * @param RI_params Real information parameters.
  */
 template <typename T>
-void mutual_information(const real_info_params &RI_params, T *A, T *B, size_t n_elem, double *info) {
+void mutual_information(const real_info_params<T> &RI_params, T *A, T *B, size_t n_elem, double *info) {
 	const int n_bits = sizeof(A[0]) * CHAR_BIT;
 	int start_bit, end_bit;
-	get_start_end_bits(n_bits, &start_bit, &end_bit);
+	get_start_end_bits<T>(RI_params, n_bits, &start_bit, &end_bit);
 	int total_bits = end_bit - start_bit;
 
 	size_t pair_counts[n_joint_counts * total_bits];
@@ -1047,7 +1079,7 @@ void mutual_information(const real_info_params &RI_params, T *A, T *B, size_t n_
  * @param info Pointer to array storing real information
  */
 template <typename T>
-void bitwise_real_information(const real_info_params &RI_params, T *A, size_t n_elem, double *info) {
+void bitwise_real_information(const real_info_params<T> &RI_params, T *A, size_t n_elem, double *info) {
 	T *B = A + 1;
 	mutual_information(RI_params, A, B, n_elem - 1, info);
 }
@@ -1063,10 +1095,10 @@ void bitwise_real_information(const real_info_params &RI_params, T *A, size_t n_
  * @param R Pointer to array to store redundancy for each bit position 
  */
 template <typename T>
-void redundancy(const real_info_params &RI_params, T *A, T *B, size_t n_elem, double *R) {
+void redundancy(const real_info_params<T> &RI_params, T *A, T *B, size_t n_elem, double *R) {
 	const int n_bits = sizeof(A[0]) * CHAR_BIT;
 	int start_bit, end_bit;
-	get_start_end_bits(n_bits, &start_bit, &end_bit);
+	get_start_end_bits<T>(RI_params, n_bits, &start_bit, &end_bit);
 	int total_bits = end_bit - start_bit;
 	double *M = new double[total_bits];
 	double *HA = new double[total_bits];
@@ -1097,10 +1129,10 @@ void redundancy(const real_info_params &RI_params, T *A, T *B, size_t n_elem, do
  *  @return Fraction of real information preserved in B with respect to A
  */
 template <typename T>
-double preserved_information_template(const real_info_params &RI_params, T *A, T *B, size_t n_elem) {
+double preserved_information_template(const real_info_params<T> &RI_params, T *A, T *B, size_t n_elem) {
 	const int n_bits = sizeof(A[0]) * CHAR_BIT;
 	int start_bit, end_bit;
-	get_start_end_bits(n_bits, &start_bit, &end_bit);
+	get_start_end_bits<T>(RI_params, n_bits, &start_bit, &end_bit);
 	int total_bits = end_bit - start_bit;
 	double *R = new double[total_bits];
 	double *I = new double[total_bits];
@@ -1134,7 +1166,7 @@ double preserved_information_template(const real_info_params &RI_params, T *A, T
  * @param RI_params Real information parameters
  */
 template <typename T>
-int pick_bits_to_shave_template(const real_info_params &RI_params, T *A, size_t n_elem, double tolerance, int nbits_old) {
+int pick_bits_to_shave_template(const real_info_params<T> &RI_params, T *A, size_t n_elem, double tolerance, int nbits_old) {
   int max_bits = sizeof(T) * CHAR_BIT; 
   T *s = new T[n_elem];
   int start_bit;
@@ -1200,7 +1232,7 @@ int pick_bits_to_shave_template(const real_info_params &RI_params, T *A, size_t 
  *         preserving the exponent bits and sign bit.
  */
 template <typename T>
-int get_max_shave_bits(const real_info_params &RI_params) {
+int get_max_shave_bits(const real_info_params<T> &RI_params) {
   int max_bits = sizeof(T) * CHAR_BIT; 
   if (RI_params.fixed_point) {
 	max_bits = sizeof(int64_t) * CHAR_BIT;
@@ -1226,7 +1258,7 @@ int get_max_shave_bits(const real_info_params &RI_params) {
  * @return Number of bits that can be shaved while maintaining information above tolerance.
  */
 template <typename T>
-int binary_search(const real_info_params &RI_params, T *A, size_t n_elem, double tolerance, int start_bit, int high_bit, int low_bit) {
+int binary_search(const real_info_params<T> &RI_params, T *A, size_t n_elem, double tolerance, int start_bit, int high_bit, int low_bit) {
 	T s_high[n_elem];
 	T s_low[n_elem];
     //shave_template<T>(A, n_elem, start_bit, s_high);
@@ -1267,11 +1299,11 @@ int binary_search(const real_info_params &RI_params, T *A, size_t n_elem, double
  * @param config_file The path to the configuration file.
  */
 template <typename T>
-int pick_bits_to_shave_binary_search_template(const real_info_params &RI_params, T *A, size_t n_elem, double tolerance, int nbits_old, char *config_file) {
+int pick_bits_to_shave_binary_search_template(const real_info_params<T> &RI_params, T *A, size_t n_elem, double tolerance, int nbits_old, char *config_file) {
 	int max_shave_bits = get_max_shave_bits<T>(RI_params);
 
   // XXX: Check why do we need this?
-	if (RI_params.mask_zero) {
+  if (RI_params.mask_zero) {
     size_t n_non_zero = 0;
 	for (size_t i = 0; i < n_elem; i++) {
 	  if (std::abs(A[i]) >= EPS) {

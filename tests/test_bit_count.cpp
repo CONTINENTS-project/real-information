@@ -6,9 +6,12 @@ int main() {
 	const char *filename = "/work/d446/d446/ab_continents/cesm_workflow/real-information/tests/A.txt";
 	read_input_data(filename, data, n_elements);
 
+	std::string config_file = "/work/d446/d446/ab_continents/cesm_workflow/real-information/tests/test_yaml_override.yaml";
+	real_info_params<float> params(config_file.data(), data, n_elements);
+
 	size_t bit_counts[32];
 	size_t n_non_zero = 0;
-	bit_count<float>(data, n_elements, bit_counts, &n_non_zero);
+	bit_count<float>(params, data, n_elements, bit_counts, &n_non_zero);
 
 	size_t bit_counts_expected[32];
 	read_yaml_list("/work/d446/d446/ab_continents/cesm_workflow/real-information/tests/expected.yaml", "bit_counts", bit_counts_expected, 32);
@@ -17,8 +20,6 @@ int main() {
 		test_assert(bit_counts[i] == bit_counts_expected[i], __FILE__, __LINE__, message);
 	}
 
-	std::string config_file = "/glade/work/aborissov/cesm_workflow/real-information/tests/test_yaml_override.yaml";
-	real_info_params params(config_file.data());
 	bit_count_bits<float>(params, data, n_elements, bit_counts, &n_non_zero);
 	for (int i = 0; i < 32; i++) {
 		std::string message = "Bit count (bits class) for bit " + std::to_string(i) + " does not match expected value " + std::to_string(bit_counts[i]) + " != " + std::to_string(bit_counts_expected[i]);
