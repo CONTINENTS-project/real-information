@@ -244,6 +244,14 @@ class FP {
 		return static_cast<T>(value) / (scale_factor * std::numeric_limits<int64_t>::max()) + offset;
 	}
 
+	/**
+	 * Convert the fixed-point value back to its original floating-point representation, without the offset.
+	 * Used for converting back differences between fixed-point values where the offset has been cancelled out.
+	 */
+	T convert_back_no_offset() {
+		return static_cast<T>(value) / (scale_factor * std::numeric_limits<int64_t>::max());
+	}
+
 	FP operator+(const FP &other) {
 		FP<T> return_value;
 		return_value.value = value + other.value + static_cast<int64_t>(offset * scale_factor * std::numeric_limits<int64_t>::max());
@@ -281,7 +289,10 @@ void get_fixed_point_init_params(T *x, size_t n_elem, T *scale_factor, T *offset
 
 template <typename T>
 void get_start_end_bits(const real_info_params<T> &params, int n_bits, int *start, int *end) {
-	if (params.mantissa_only) {
+	if (params.fixed_point) {
+		*start = 0;
+		*end = 63; // Assuming 64-bit fixed-point representation
+	} else if (params.mantissa_only) {
 		if (n_bits == 32) {
 			*end = 23;
 		} else if (n_bits == 64) {
@@ -459,8 +470,19 @@ template <typename T>
 void shave_bits(const real_info_params<T> &RI_params, T *A, size_t n_elem, int n, T *shaved) {
 	for (size_t i = 0; i < n_elem; i++) {
 		bits<T> b(RI_params, A[i]);
+		uint64_t a;
+		if (RI_params.fixed_point) {
+			a = b.bit_set_64;
+		}
 		b.shave(n);
-		shaved[i] = b.convert_back();
+		if (RI_params.fixed_point) {
+			FP<T> diff_fp(RI_params.scale_factor, RI_params.offset, A[i]);
+			diff_fp.value = a - b.bit_set_64;
+			T diff = diff_fp.convert_back_no_offset();
+			shaved[i] = A[i] - diff;
+		} else {
+			shaved[i] = b.convert_back();
+		}
 	}
 }
 
@@ -1130,15 +1152,37 @@ void redundancy(const real_info_params<T> &RI_params, T *A, T *B, size_t n_elem,
  */
 template <typename T>
 double preserved_information_template(const real_info_params<T> &RI_params, T *A, T *B, size_t n_elem) {
+    real_info_params<T> float_params = RI_params;
+	float_params.fixed_point = false;
 	const int n_bits = sizeof(A[0]) * CHAR_BIT;
 	int start_bit, end_bit;
-	get_start_end_bits<T>(RI_params, n_bits, &start_bit, &end_bit);
+	get_start_end_bits<T>(float_params, n_bits, &start_bit, &end_bit);
 	int total_bits = end_bit - start_bit;
 	double *R = new double[total_bits];
 	double *I = new double[total_bits];
 
-	redundancy(RI_params, A, B, n_elem, R);
-	bitwise_real_information(RI_params, A, n_elem, I);
+//	if (RI_params.fixed_point) {
+//		T *A_fl = new T[n_elem];
+//		T *B_fl = new T[n_elem];
+//		for (size_t i = 0; i < n_elem; i++) {
+//			FP<T> diff_fp = A[i];
+//			diff_fp.value = A[i].value - B[i].value;
+//			T diff = diff_fp.convert_back();
+//			A_fl[i] = A[i].convert_back();
+//			B_fl[i] = A_fl[i] - diff;
+//		}
+//
+//	    redundancy(RI_params, A_fl, B_fl, n_elem, R);
+//	    bitwise_real_information(RI_params, A_fl, n_elem, I);
+//		delete [] A_fl;
+//		delete [] B_fl;
+//	} else {
+//		redundancy(RI_params, A, B, n_elem, R);
+//		bitwise_real_information(RI_params, A, n_elem, I);
+//    }
+
+	redundancy(float_params, A, B, n_elem, R);
+	bitwise_real_information(float_params, A, n_elem, I);
 
 	double P = 0;
 	double total_information = 0;
@@ -1258,7 +1302,7 @@ int get_max_shave_bits(const real_info_params<T> &RI_params) {
  * @return Number of bits that can be shaved while maintaining information above tolerance.
  */
 template <typename T>
-int binary_search(const real_info_params<T> &RI_params, T *A, size_t n_elem, double tolerance, int start_bit, int high_bit, int low_bit) {
+void binary_search(const real_info_params<T> &RI_params, T *A, size_t n_elem, double tolerance, int &start_bit, int high_bit, int low_bit, T *shaved) {
 	T s_high[n_elem];
 	T s_low[n_elem];
     //shave_template<T>(A, n_elem, start_bit, s_high);
@@ -1271,18 +1315,28 @@ int binary_search(const real_info_params<T> &RI_params, T *A, size_t n_elem, dou
    	auto info_low = preserved_information_template<T>(RI_params, A, s_low, n_elem);
 	// Note: info_low is always >= info_high since we are shaving fewer bits
    	if (info_high < tolerance && info_low >= tolerance) {
-   		return start_bit-1;
+		memcpy(shaved, s_low, n_elem * sizeof(T));
+		start_bit = start_bit - 1;
+		return;
    	} else if (info_low < tolerance) {
-		int new_start_bit = (start_bit - low_bit)/2 + low_bit;
-		if (new_start_bit == 0) return new_start_bit;
-		return binary_search<T>(RI_params, A, n_elem, tolerance, new_start_bit, start_bit, low_bit);
+		high_bit = start_bit;
+		start_bit = (start_bit - low_bit)/2 + low_bit;
+		if (start_bit == 0) {
+			memcpy(shaved, s_low, n_elem * sizeof(T));
+			return;
+		}
+		binary_search<T>(RI_params, A, n_elem, tolerance, start_bit, high_bit, low_bit, shaved);
 	} else if (info_high >= tolerance) {
-		int new_start_bit = (high_bit - start_bit)/2 + start_bit;
-		if (new_start_bit == start_bit) return new_start_bit;
-		return binary_search<T>(RI_params, A, n_elem, tolerance, new_start_bit, high_bit, start_bit);
+		low_bit = start_bit;
+		start_bit = (high_bit - start_bit)/2 + start_bit;
+		if (start_bit == low_bit) {
+			memcpy(shaved, s_high, n_elem * sizeof(T));
+			return;
+		}
+		binary_search<T>(RI_params, A, n_elem, tolerance, start_bit, high_bit, low_bit, shaved);
 	} else {
 		std::cout << "binary search error start bit " << start_bit << " old bits shaved " << start_bit << " info high " << info_high << " info low " << info_low << " tolerance " << tolerance << "\n";
-		return 0;
+		return;
 	}
 }
 
@@ -1299,7 +1353,7 @@ int binary_search(const real_info_params<T> &RI_params, T *A, size_t n_elem, dou
  * @param config_file The path to the configuration file.
  */
 template <typename T>
-int pick_bits_to_shave_binary_search_template(const real_info_params<T> &RI_params, T *A, size_t n_elem, double tolerance, int nbits_old, char *config_file) {
+int pick_bits_to_shave_binary_search_template(const real_info_params<T> &RI_params, T *A, size_t n_elem, double tolerance, int nbits_old, char *config_file, T *shaved) {
 	int max_shave_bits = get_max_shave_bits<T>(RI_params);
 
   // XXX: Check why do we need this?
@@ -1316,13 +1370,16 @@ int pick_bits_to_shave_binary_search_template(const real_info_params<T> &RI_para
   }
 
   bit_pair_count_calls = 0;
+  int start_bit;
   if (nbits_old == 0) {
-	return binary_search<T>(RI_params, A, n_elem, tolerance, max_shave_bits/2, max_shave_bits, 0);
+	start_bit = max_shave_bits/2;
+	binary_search<T>(RI_params, A, n_elem, tolerance, start_bit, max_shave_bits, 0, shaved);
   } else {
-	return binary_search<T>(RI_params, A, n_elem, tolerance, nbits_old, max_shave_bits, 0);
+	start_bit = nbits_old;
+	binary_search<T>(RI_params, A, n_elem, tolerance, start_bit, max_shave_bits, 0, shaved);
   }
 
-  return 0;
+  return start_bit;
 }
 
 #endif

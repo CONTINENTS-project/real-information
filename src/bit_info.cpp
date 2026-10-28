@@ -5,14 +5,16 @@
  */
 
 extern "C" {
-	void shave_float(float *A, size_t n_elem, int n, float *shaved) {
-		shave_template<float>(A, n_elem, n, shaved);
+	void shave_float(float *A, size_t n_elem, int n, float *shaved, char *config_file) {
+		real_info_params<float> params(config_file, A, n_elem);
+		shave_bits<float>(params, A, n_elem, n, shaved);
 	}
 }
 
 extern "C" {
-	void shave_double(double *A, size_t n_elem, int n, double *shaved) {
-		shave_template<double>(A, n_elem, n, shaved);
+	void shave_double(double *A, size_t n_elem, int n, double *shaved, char *config_file) {
+		real_info_params<double> params(config_file, A, n_elem);
+		shave_bits<double>(params, A, n_elem, n, shaved);
 	}
 }
 
@@ -93,16 +95,16 @@ extern "C" {
 }
 
 extern "C" {
-	int pick_bits_to_shave_binary_search_float(float *A, size_t n_elem, double tolerance, int nbits_old, char *config_file) {
+	int pick_bits_to_shave_binary_search_float(float *A, size_t n_elem, double tolerance, int nbits_old, char *config_file , float *shaved) {
 		real_info_params<float> params(config_file, A, n_elem);
-		return pick_bits_to_shave_binary_search_template<float>(params, A, n_elem, tolerance, nbits_old, config_file);
+		return pick_bits_to_shave_binary_search_template<float>(params, A, n_elem, tolerance, nbits_old, config_file, shaved);
 	}
 }
 
 extern "C" {
-	int pick_bits_to_shave_binary_search_double(double *A, size_t n_elem, double tolerance, int nbits_old, char *config_file) {
+	int pick_bits_to_shave_binary_search_double(double *A, size_t n_elem, double tolerance, int nbits_old, char *config_file, double *shaved) {
 		real_info_params<double> params(config_file, A, n_elem);
-		return pick_bits_to_shave_binary_search_template<double>(params, A, n_elem, tolerance, nbits_old, config_file);
+		return pick_bits_to_shave_binary_search_template<double>(params, A, n_elem, tolerance, nbits_old, config_file, shaved);
 	}
 }
 

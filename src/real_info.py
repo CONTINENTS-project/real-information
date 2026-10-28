@@ -7,7 +7,7 @@ import numpy as np
 _DEFAULT_LIB_PATH = (
     Path(__file__).resolve().parents[2]
     / "install"
-    / "real-info"
+    / "real-information"
     / "lib"
     / "bit_info.so"
 )
@@ -50,14 +50,16 @@ def pick_bits_to_shave_binary_search(A, n_elem, tol, current_bits, config_path):
     dtype_str = _infer_dtype(A)
     if dtype_str == "float":
         c_func = real_info.pick_bits_to_shave_binary_search_float
-        c_func.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_size_t, ctypes.c_double, ctypes.c_int, ctypes.c_char_p]
+        c_func.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_size_t, ctypes.c_double, ctypes.c_int, ctypes.c_char_p, ctypes.POINTER(ctypes.c_float)]
         c_func.restype = ctypes.c_int
-        return c_func(A.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), n_elem, ctypes.c_double(tol), current_bits, config_path.encode('utf-8'))
+        A_shaved = np.zeros(n_elem, dtype=np.float32)
+        return (c_func(A.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), n_elem, ctypes.c_double(tol), current_bits, config_path.encode('utf-8'), A_shaved.ctypes.data_as(ctypes.POINTER(ctypes.c_float))), A_shaved)
     elif dtype_str == "double":
         c_func = real_info.pick_bits_to_shave_binary_search_double
-        c_func.argtypes = [ctypes.POINTER(ctypes.c_double), ctypes.c_size_t, ctypes.c_double, ctypes.c_int, ctypes.c_char_p]
+        c_func.argtypes = [ctypes.POINTER(ctypes.c_double), ctypes.c_size_t, ctypes.c_double, ctypes.c_int, ctypes.c_char_p, ctypes.POINTER(ctypes.c_double)]
         c_func.restype = ctypes.c_int
-        return c_func(A.ctypes.data_as(ctypes.POINTER(ctypes.c_double)), n_elem, ctypes.c_double(tol), current_bits, config_path.encode('utf-8'))
+        A_shaved = np.zeros(n_elem, dtype=np.float64)
+        return (c_func(A.ctypes.data_as(ctypes.POINTER(ctypes.c_double)), n_elem, ctypes.c_double(tol), current_bits, config_path.encode('utf-8'), A_shaved.ctypes.data_as(ctypes.POINTER(ctypes.c_double))), A_shaved)
     else:
         raise ValueError(f"Unsupported dtype for pick_bits_to_shave_binary_search: {dtype_str}")
 
@@ -76,21 +78,21 @@ def presereved_information(A, B, n_elem, config_path):
     else:
         raise ValueError(f"Unsupported dtype for preserved_information: {dtype_str}")
 
-def shave(A, n_elem, n):
+def shave(A, n_elem, n, config_path):
     dtype_str = _infer_dtype(A)
     if dtype_str == "float":
         shaved = np.zeros(n_elem, dtype=np.float32)
         c_func = real_info.shave_float
-        c_func.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_size_t, ctypes.c_int, ctypes.POINTER(ctypes.c_float)]
+        c_func.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_size_t, ctypes.c_int, ctypes.POINTER(ctypes.c_float), ctypes.c_char_p]
         c_func.restype = None
-        c_func(A.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), n_elem, n, shaved.ctypes.data_as(ctypes.POINTER(ctypes.c_float)))
+        c_func(A.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), n_elem, n, shaved.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), config_path.encode('utf-8'))
         return shaved
     elif dtype_str == "double":
         shaved = np.zeros(n_elem, dtype=np.float64)
         c_func = real_info.shave_double
-        c_func.argtypes = [ctypes.POINTER(ctypes.c_double), ctypes.c_size_t, ctypes.c_int, ctypes.POINTER(ctypes.c_double)]
+        c_func.argtypes = [ctypes.POINTER(ctypes.c_double), ctypes.c_size_t, ctypes.c_int, ctypes.POINTER(ctypes.c_double), ctypes.c_char_p]
         c_func.restype = None
-        c_func(A.ctypes.data_as(ctypes.POINTER(ctypes.c_double)), n_elem, n, shaved.ctypes.data_as(ctypes.POINTER(ctypes.c_double)))
+        c_func(A.ctypes.data_as(ctypes.POINTER(ctypes.c_double)), n_elem, n, shaved.ctypes.data_as(ctypes.POINTER(ctypes.c_double)), config_path.encode('utf-8'))
         return shaved
     else:
         raise ValueError(f"Unsupported dtype for shave: {dtype_str}")
