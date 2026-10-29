@@ -15,6 +15,8 @@
 #include <cmath>
 #include <cassert>
 #include <cstring>
+#include <cstdint>
+#include <stdexcept>
 #include <mpi.h>
 
 inline int get_n_exponent_bits(int nbits);
@@ -166,8 +168,60 @@ void read_yaml_scalar(const char *config_file, const std::string &key, T *out, c
 	std::cerr << "Key \"" << key << "\" not found in config file: " << config_file << "\n";
 }
 
+class fixed_point_error : public std::invalid_argument {
+public:
+	using std::invalid_argument::invalid_argument;
+};
+
+// C callers must check this after operations that initialize a fixed-point
+// range. Errors return -1 from selectors or NaN from preservation; void calls
+// report errors through this accessor. The message is local to the calling
+// thread and cleared by its next guarded call. A null pointer means success.
+extern "C" const char *real_info_last_fixed_point_error();
+
 template <typename T>
-void get_fixed_point_init_params(T *x, size_t n_elem, T *scale_factor, T *offset);
+struct fixed_point_range {
+	T minimum{};
+	T maximum{};
+	double width = 0;
+	bool constant = true;
+};
+
+template <typename T>
+fixed_point_range<T> get_fixed_point_init_params(const T *x, size_t n_elem) {
+	static_assert(std::is_same_v<T, float> || std::is_same_v<T, double>);
+	if (n_elem == 0 || x == nullptr) {
+		throw fixed_point_error("Fixed-point initialization requires a nonempty array.");
+	}
+	for (size_t i = 0; i < n_elem; ++i) {
+		if (!std::isfinite(x[i])) {
+			throw fixed_point_error("Fixed-point input must contain only finite values.");
+		}
+	}
+	const auto extrema = std::minmax_element(x, x + n_elem);
+	fixed_point_range<T> range;
+	range.minimum = *extrema.first;
+	range.maximum = *extrema.second;
+	range.constant = range.minimum == range.maximum;
+	if (!range.constant) {
+		// Subtract after promotion so a float range can exceed FLT_MAX safely.
+		range.width = static_cast<double>(range.maximum) - static_cast<double>(range.minimum);
+		if (!std::isfinite(range.width) || range.width <= 0) {
+			throw fixed_point_error("Fixed-point range must have a finite positive width in double precision.");
+		}
+	}
+	return range;
+}
+
+// Empty analysis inputs are invalid; singleton finite arrays are constant.
+template <typename T>
+bool is_constant_array(const T *x, size_t n_elem) {
+	if (n_elem == 0 || x == nullptr) {
+		throw fixed_point_error("Information analysis requires a nonempty array.");
+	}
+	return std::isfinite(x[0]) &&
+		std::all_of(x + 1, x + n_elem, [first = x[0]](T value) { return value == first; });
+}
 
 template <typename T>
 class real_info_params {
@@ -178,8 +232,7 @@ class real_info_params {
 	    bool mantissa_only;
 		bool mask_zero;
 		bool fixed_point;
-		T offset;
-		T scale_factor;
+		fixed_point_range<T> fixed_range;
 	
 		real_info_params(char *config_file) {
 			this->config_file = config_file;
@@ -187,9 +240,7 @@ class real_info_params {
 			read_yaml_scalar(config_file, "mask_zero", &mask_zero);
 			read_yaml_scalar(config_file, "fixed_point", &fixed_point);
 			if (fixed_point) {
-				// Abort since we didn't get any data to base our offset and scale factor on
-				std::cerr << "Error: No data provided for fixed-point initialization.\n";
-				std::abort();
+				throw fixed_point_error("Fixed-point initialization requires input data.");
 			}
 		}
 
@@ -199,93 +250,101 @@ class real_info_params {
 			read_yaml_scalar(config_file, "mask_zero", &mask_zero);
 			read_yaml_scalar(config_file, "fixed_point", &fixed_point);
 			if (fixed_point) {
-				get_fixed_point_init_params(data, n_elem, &scale_factor, &offset);
+				fixed_range = get_fixed_point_init_params(data, n_elem);
 			}
 		}
 };
 
-/* 
-  Fixed-point arithmetic class modelled on Alex Pinard's implementation. 
+template <typename T>
+bool copy_constant_fixed_point(const real_info_params<T> &params, const T *input,
+	size_t n_elem, T *output) {
+	if (!params.fixed_point || !params.fixed_range.constant) return false;
+	if (n_elem == 0) return true;
+	if (input == nullptr || output == nullptr) {
+		throw fixed_point_error("Fixed-point conversion requires valid input and output arrays.");
+	}
+	for (size_t i = 0; i < n_elem; ++i) {
+		if (!std::isfinite(input[i]) || input[i] != params.fixed_range.minimum) {
+			throw fixed_point_error("Fixed-point value does not match the initialized constant range.");
+		}
+	}
+	// Copy the original values to preserve the signs of zero as well.
+	if (input != output) std::copy_n(input, n_elem, output);
+	return true;
+}
 
-  For a given value, x, in a dataset the fixed point value is represented by
-  int64_t((x - x_min)/(x_max - x_min) * 2^64 - 1). 
+/*
+  Fixed-point arithmetic class modelled on Alex Pinard's implementation.
 
-  In this implementation, scale_factor = 1/(x_max - x_min), offset = x_min.
+  The endpoints map to 0 and max_code. max_code = 2^63 - 1024 is exactly
+  representable as both double and int64_t, unlike double(INT64_MAX).
+  Interior values are normalized in double precision and truncated.
+  Constant ranges use code 0 and decode directly to their stored value.
 */
 template <typename T>
 class FP {
-  public:
-	int64_t value;	
+	static_assert(std::is_same_v<T, float> || std::is_same_v<T, double>);
+	static_assert(std::numeric_limits<double>::digits >= 53,
+		"The fixed-point endpoint requires at least 53 bits of double precision.");
+	fixed_point_range<T> range_;
 
-	//static constexpr int64_t scale_bits = 1 << SB;
-	int64_t scale_bits;
-	T scale_factor;
-	T offset;
-
-    FP(T scale_factor, T offset) : scale_factor(scale_factor), offset(offset) {
-		if (std::is_same_v<T,float> || std::is_same_v<T,double>) {
-		  value = static_cast<int64_t>(-offset * scale_factor * std::numeric_limits<int64_t>::max());
-		} else {
-		  std::cout << "Expected float or double type\n";
-		  std::abort();
+	int64_t encode(double x) const {
+		if (!std::isfinite(x) || x < static_cast<double>(range_.minimum) ||
+			x > static_cast<double>(range_.maximum)) {
+			throw fixed_point_error("Fixed-point value must be finite and inside the initialized range.");
 		}
+		if (range_.constant || x == static_cast<double>(range_.minimum)) return 0;
+		if (x == static_cast<double>(range_.maximum)) return max_code;
+		const double normalized = std::clamp(
+			(x - static_cast<double>(range_.minimum)) / range_.width, 0.0, 1.0);
+		return static_cast<int64_t>(normalized * static_cast<double>(max_code));
 	}
 
-    FP(T scale_factor, T offset, T x) : scale_factor(scale_factor), offset(offset) {
-		if (std::is_same_v<T,float> || std::is_same_v<T,double>) {
-		  value = static_cast<int64_t>((x - offset) * scale_factor * std::numeric_limits<int64_t>::max());
-		} else {
-		  std::cout << "Expected float or double type\n";
-		  std::abort();
+	double normalized_value() const {
+		if (value < 0 || value > max_code) {
+			throw fixed_point_error("Fixed-point code is outside the initialized mapping.");
 		}
+		return static_cast<double>(value) / static_cast<double>(max_code);
 	}
 
-	T convert_back() {
-		return static_cast<T>(value) / (scale_factor * std::numeric_limits<int64_t>::max()) + offset;
+public:
+	static constexpr int64_t max_code = std::numeric_limits<int64_t>::max() - 1023;
+	int64_t value = 0;
+
+	// Construct an encoded zero directly; do not try to encode floating-point 0.
+	explicit FP(const fixed_point_range<T> &range) : range_(range) {}
+
+	FP(const fixed_point_range<T> &range, T x) : range_(range) {
+		value = encode(static_cast<double>(x));
 	}
 
-	/**
-	 * Convert the fixed-point value back to its original floating-point representation, without the offset.
-	 * Used for converting back differences between fixed-point values where the offset has been cancelled out.
-	 */
-	T convert_back_no_offset() {
-		return static_cast<T>(value) / (scale_factor * std::numeric_limits<int64_t>::max());
+	T convert_back() const {
+		if (range_.constant) return range_.minimum;
+		const double normalized = normalized_value();
+		if (value == 0) return range_.minimum;
+		if (value == max_code) return range_.maximum;
+		return static_cast<T>(std::lerp(static_cast<double>(range_.minimum),
+			static_cast<double>(range_.maximum), normalized));
 	}
 
-	FP operator+(const FP &other) {
-		FP<T> return_value;
-		return_value.value = value + other.value + static_cast<int64_t>(offset * scale_factor * std::numeric_limits<int64_t>::max());
-		return return_value;
+	// Keep differences in double precision until the final output conversion.
+	double convert_back_no_offset() const {
+		if (range_.constant) return 0.0;
+		return normalized_value() * range_.width;
 	}
 
-	FP operator-(const FP &other) {
-		FP<T> return_value;
-		return_value.value = value - other.value - static_cast<int64_t>(offset * scale_factor * std::numeric_limits<int64_t>::max());
-		return return_value;
+	FP operator+(const FP &other) const {
+		FP result(range_);
+		result.value = encode(static_cast<double>(convert_back()) + static_cast<double>(other.convert_back()));
+		return result;
 	}
 
-	// I don't *think* we need these
-	//FP operator*(const FP &other) {
-	//	FP<T> return_value;
-	//	return_value.value = value * other.value / scale_factor; // When multiplying we have two factors of scale_bits, so need to remove one.
-	//	return return_value;
-	//}
-
-	//FP operator/(const FP &other) {
-	//	FP<T> return_value;
-	//	return_value.value = (value * scale_bits) / other.value; // When dividing we have two factors of scale_bits, so need to remove one.
-	//	return return_value;
-	//}
-
+	FP operator-(const FP &other) const {
+		FP result(range_);
+		result.value = encode(static_cast<double>(convert_back()) - static_cast<double>(other.convert_back()));
+		return result;
+	}
 };
-
-template <typename T>
-void get_fixed_point_init_params(T *x, size_t n_elem, T *scale_factor, T *offset) {
-	T x_min = *std::min_element(x, x + n_elem);
-	T x_max = *std::max_element(x, x + n_elem);
-	*scale_factor = 1.0 / (x_max - x_min);
-	*offset = x_min;
-}
 
 template <typename T>
 void get_start_end_bits(const real_info_params<T> &params, int n_bits, int *start, int *end) {
@@ -328,7 +387,7 @@ class bits{
 		 */
 		bits(const real_info_params<T> &params, T x) : params_(params) {
 			if (params_.fixed_point) {
-				FP<T> x_fp(params_.scale_factor, params_.offset, x);
+				FP<T> x_fp(params_.fixed_range, x);
 				std::memcpy(&bit_set_64, &x_fp.value, sizeof(int64_t));
 			} else if (std::is_same_v<T, float>) {
 				std::memcpy(&bit_set_32, &x, sizeof(float));
@@ -344,7 +403,7 @@ class bits{
 		T convert_back() {
 			T result;
 			if (params_.fixed_point) {
-				FP<T> temp(params_.scale_factor, params_.offset);
+				FP<T> temp(params_.fixed_range);
 				std::memcpy(&temp.value, &bit_set_64, sizeof(int64_t));
 				result = temp.convert_back();
 			} else if (std::is_same_v<T, float>) {
@@ -360,6 +419,7 @@ class bits{
 		 * @param n Number of least-significant bits to shave.
 		 */
 		void shave(int n) {
+			if (params_.fixed_point && params_.fixed_range.constant) return;
 			if (params_.fixed_point) {
 				uint64_t mask = 0xFFFFFFFFFFFFFFFF << n;
 				bit_set_64 &= mask;
@@ -377,6 +437,7 @@ class bits{
 		 * @param n Number of least-significant bits to set.
 		 */
 		void set(int n) {
+			if (params_.fixed_point && params_.fixed_range.constant) return;
 			if (params_.fixed_point) {
 				uint64_t mask = 0xFFFFFFFFFFFFFFFF << n;
 				bit_set_64 |= ~mask;
@@ -394,6 +455,7 @@ class bits{
 		 * @param n Number of least-significant bits to modify.
 		 */
 		void halfshave(int n) {
+			if (params_.fixed_point && params_.fixed_range.constant) return;
 			int nbits = sizeof(T) * CHAR_BIT;
 			if (params_.fixed_point) {
 				uint64_t keep_mask = 0xFFFFFFFFFFFFFFFF << n;
@@ -418,6 +480,7 @@ class bits{
 		 * @param n Number of least-significant bits to round away.
 		 */
 		void round(int n) {
+			if (params_.fixed_point && params_.fixed_range.constant) return;
 			int nbits = sizeof(T) * CHAR_BIT;
 			int mantissa_bits = nbits - get_n_exponent_bits(nbits) - 1;
 			int keepbits = mantissa_bits - n;
@@ -468,6 +531,7 @@ class bits{
  */
 template <typename T>
 void shave_bits(const real_info_params<T> &RI_params, T *A, size_t n_elem, int n, T *shaved) {
+	if (n_elem == 0 || copy_constant_fixed_point(RI_params, A, n_elem, shaved)) return;
 	for (size_t i = 0; i < n_elem; i++) {
 		bits<T> b(RI_params, A[i]);
 		uint64_t a;
@@ -476,10 +540,13 @@ void shave_bits(const real_info_params<T> &RI_params, T *A, size_t n_elem, int n
 		}
 		b.shave(n);
 		if (RI_params.fixed_point) {
-			FP<T> diff_fp(RI_params.scale_factor, RI_params.offset, A[i]);
-			diff_fp.value = a - b.bit_set_64;
-			T diff = diff_fp.convert_back_no_offset();
-			shaved[i] = A[i] - diff;
+			FP<T> diff_fp(RI_params.fixed_range);
+			diff_fp.value = static_cast<int64_t>(a - b.bit_set_64);
+			const double diff = diff_fp.convert_back_no_offset();
+			const double result = std::clamp(static_cast<double>(A[i]) - diff,
+				static_cast<double>(RI_params.fixed_range.minimum),
+				static_cast<double>(RI_params.fixed_range.maximum));
+			shaved[i] = static_cast<T>(result);
 		} else {
 			shaved[i] = b.convert_back();
 		}
@@ -496,6 +563,7 @@ void shave_bits(const real_info_params<T> &RI_params, T *A, size_t n_elem, int n
  */
 template <typename T>
 void halfshave_bits(const real_info_params<T> &RI_params, T *A, size_t n_elem, int n, T *halfshaved) {
+	if (n_elem == 0 || copy_constant_fixed_point(RI_params, A, n_elem, halfshaved)) return;
 	for (size_t i = 0; i < n_elem; i++) {
 		bits<T> b(RI_params, A[i]);
 		b.halfshave(n);
@@ -513,6 +581,7 @@ void halfshave_bits(const real_info_params<T> &RI_params, T *A, size_t n_elem, i
  */
 template <typename T>
 void bit_rounding_bits(const real_info_params<T> &RI_params, T *A, size_t n_elem, int n, T *bit_rounding_result) {
+	if (n_elem == 0 || copy_constant_fixed_point(RI_params, A, n_elem, bit_rounding_result)) return;
 	for (size_t i = 0; i < n_elem; i++) {
 		bits<T> b(RI_params, A[i]);
 		b.round(n);
@@ -530,6 +599,7 @@ void bit_rounding_bits(const real_info_params<T> &RI_params, T *A, size_t n_elem
  */
 template <typename T>
 void set_bits(const real_info_params<T> &RI_params, T *A, size_t n_elem, int n, T *set) {
+	if (n_elem == 0 || copy_constant_fixed_point(RI_params, A, n_elem, set)) return;
 	for (size_t i = 0; i < n_elem; i++) {
 		bits<T> b(RI_params, A[i]);
 		b.set(n);
@@ -1152,6 +1222,14 @@ void redundancy(const real_info_params<T> &RI_params, T *A, T *B, size_t n_elem,
  */
 template <typename T>
 double preserved_information_template(const real_info_params<T> &RI_params, T *A, T *B, size_t n_elem) {
+	if (B == nullptr) {
+		throw fixed_point_error("Information preservation requires a valid comparison array.");
+	}
+	if (is_constant_array(A, n_elem)) {
+		// A constant reference has zero information: use an explicit lossless
+		// convention instead of a ratio with a zero denominator.
+		return std::memcmp(A, B, n_elem * sizeof(T)) == 0 ? 1.0 : 0.0;
+	}
     real_info_params<T> float_params = RI_params;
 	float_params.fixed_point = false;
 	const int n_bits = sizeof(A[0]) * CHAR_BIT;
@@ -1211,6 +1289,7 @@ double preserved_information_template(const real_info_params<T> &RI_params, T *A
  */
 template <typename T>
 int pick_bits_to_shave_template(const real_info_params<T> &RI_params, T *A, size_t n_elem, double tolerance, int nbits_old) {
+  if (is_constant_array(A, n_elem)) return 0;
   int max_bits = sizeof(T) * CHAR_BIT; 
   T *s = new T[n_elem];
   int start_bit;
@@ -1354,6 +1433,13 @@ void binary_search(const real_info_params<T> &RI_params, T *A, size_t n_elem, do
  */
 template <typename T>
 int pick_bits_to_shave_binary_search_template(const real_info_params<T> &RI_params, T *A, size_t n_elem, double tolerance, int nbits_old, char *config_file, T *shaved) {
+	if (is_constant_array(A, n_elem)) {
+		if (shaved == nullptr) {
+			throw fixed_point_error("Bit selection requires a valid output array.");
+		}
+		if (A != shaved) std::copy_n(A, n_elem, shaved);
+		return 0;
+	}
 	int max_shave_bits = get_max_shave_bits<T>(RI_params);
 
   // XXX: Check why do we need this?

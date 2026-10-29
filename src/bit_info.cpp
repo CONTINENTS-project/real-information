@@ -1,20 +1,54 @@
 #include "bit_info.h"
 
+namespace {
+	thread_local std::string fixed_point_error_message;
+
+	// Keep fixed-point validation exceptions inside the C++ boundary. Existing
+	// C signatures stay unchanged; Python translates the message to ValueError.
+	template <typename Function>
+	auto fixed_point_call(Function function) -> std::invoke_result_t<Function> {
+		using Result = std::invoke_result_t<Function>;
+		fixed_point_error_message.clear();
+		try {
+			return function();
+		} catch (const fixed_point_error &error) {
+			fixed_point_error_message = error.what();
+			if constexpr (std::is_void_v<Result>) {
+				return;
+			} else if constexpr (std::is_integral_v<Result>) {
+				return -1;
+			} else {
+				return std::numeric_limits<Result>::quiet_NaN();
+			}
+		}
+	}
+}
+
+extern "C" const char *real_info_last_fixed_point_error() {
+	return fixed_point_error_message.empty() ? nullptr : fixed_point_error_message.c_str();
+}
+
 /**
  * Template instantiations for FORTRAN/C interface
  */
 
 extern "C" {
 	void shave_float(float *A, size_t n_elem, int n, float *shaved, char *config_file) {
-		real_info_params<float> params(config_file, A, n_elem);
-		shave_bits<float>(params, A, n_elem, n, shaved);
+		fixed_point_call([&] {
+			if (n_elem == 0) return;
+			real_info_params<float> params(config_file, A, n_elem);
+			shave_bits<float>(params, A, n_elem, n, shaved);
+		});
 	}
 }
 
 extern "C" {
 	void shave_double(double *A, size_t n_elem, int n, double *shaved, char *config_file) {
-		real_info_params<double> params(config_file, A, n_elem);
-		shave_bits<double>(params, A, n_elem, n, shaved);
+		fixed_point_call([&] {
+			if (n_elem == 0) return;
+			real_info_params<double> params(config_file, A, n_elem);
+			shave_bits<double>(params, A, n_elem, n, shaved);
+		});
 	}
 }
 
@@ -68,43 +102,55 @@ extern "C" {
 
 extern "C" {
 	double preserved_information_float(float *A, float *B, size_t n_elem, char *config_file) {
-		real_info_params<float> params(config_file, A, n_elem);
-		return preserved_information_template<float>(params, A, B, n_elem);
+		return fixed_point_call([&] {
+			real_info_params<float> params(config_file, A, n_elem);
+			return preserved_information_template<float>(params, A, B, n_elem);
+		});
 	}
 }
 
 extern "C" {
 	double preserved_information_double(double *A, double *B, size_t n_elem, char *config_file) {
-		real_info_params<double> params(config_file, A, n_elem);
-		return preserved_information_template<double>(params, A, B, n_elem);
+		return fixed_point_call([&] {
+			real_info_params<double> params(config_file, A, n_elem);
+			return preserved_information_template<double>(params, A, B, n_elem);
+		});
 	}
 }
 
 extern "C" {
 	int pick_bits_to_shave_float(float *A, size_t n_elem, double tolerance, int nbits_old, char *config_file) {
-		real_info_params<float> params(config_file, A, n_elem);
-		return pick_bits_to_shave_template<float>(params, A, n_elem, tolerance, nbits_old);
+		return fixed_point_call([&] {
+			real_info_params<float> params(config_file, A, n_elem);
+			return pick_bits_to_shave_template<float>(params, A, n_elem, tolerance, nbits_old);
+		});
 	}
 }
 
 extern "C" {
 	int pick_bits_to_shave_double(double *A, size_t n_elem, double tolerance, int nbits_old, char *config_file) {
-		real_info_params<double> params(config_file, A, n_elem);
-		return pick_bits_to_shave_template<double>(params, A, n_elem, tolerance, nbits_old);
+		return fixed_point_call([&] {
+			real_info_params<double> params(config_file, A, n_elem);
+			return pick_bits_to_shave_template<double>(params, A, n_elem, tolerance, nbits_old);
+		});
 	}
 }
 
 extern "C" {
 	int pick_bits_to_shave_binary_search_float(float *A, size_t n_elem, double tolerance, int nbits_old, char *config_file , float *shaved) {
-		real_info_params<float> params(config_file, A, n_elem);
-		return pick_bits_to_shave_binary_search_template<float>(params, A, n_elem, tolerance, nbits_old, config_file, shaved);
+		return fixed_point_call([&] {
+			real_info_params<float> params(config_file, A, n_elem);
+			return pick_bits_to_shave_binary_search_template<float>(params, A, n_elem, tolerance, nbits_old, config_file, shaved);
+		});
 	}
 }
 
 extern "C" {
 	int pick_bits_to_shave_binary_search_double(double *A, size_t n_elem, double tolerance, int nbits_old, char *config_file, double *shaved) {
-		real_info_params<double> params(config_file, A, n_elem);
-		return pick_bits_to_shave_binary_search_template<double>(params, A, n_elem, tolerance, nbits_old, config_file, shaved);
+		return fixed_point_call([&] {
+			real_info_params<double> params(config_file, A, n_elem);
+			return pick_bits_to_shave_binary_search_template<double>(params, A, n_elem, tolerance, nbits_old, config_file, shaved);
+		});
 	}
 }
 

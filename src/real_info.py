@@ -22,6 +22,28 @@ if not _lib_path.is_file():
 
 real_info = ctypes.CDLL(str(_lib_path))
 
+real_info.real_info_last_fixed_point_error.argtypes = []
+real_info.real_info_last_fixed_point_error.restype = ctypes.c_char_p
+
+
+def _check_fixed_point_result(result, function, arguments):
+    error = real_info.real_info_last_fixed_point_error()
+    if error is not None:
+        raise ValueError(error.decode("utf-8"))
+    return result
+
+
+# Check only the entry points that initialize or validate fixed-point ranges.
+# Their C signatures and the existing Python return values remain unchanged.
+for _function_name in (
+    "shave_float", "shave_double",
+    "preserved_information_float", "preserved_information_double",
+    "pick_bits_to_shave_float", "pick_bits_to_shave_double",
+    "pick_bits_to_shave_binary_search_float", "pick_bits_to_shave_binary_search_double",
+):
+    getattr(real_info, _function_name).errcheck = _check_fixed_point_result
+del _function_name
+
 def _infer_dtype(A):
     if hasattr(A, "dtype"):
         import numpy as np
