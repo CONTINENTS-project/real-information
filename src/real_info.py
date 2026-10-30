@@ -34,9 +34,13 @@ def _check_fixed_point_result(result, function, arguments):
 
 
 # Check only the entry points that initialize or validate fixed-point ranges.
-# Their C signatures and the existing Python return values remain unchanged.
+# The existing Python return values remain unchanged.
 for _function_name in (
     "shave_float", "shave_double",
+    "halfshave_float", "halfshave_double",
+    "bit_rounding_float", "bit_rounding_double",
+    "set_float", "set_double",
+    "groom_float", "groom_double",
     "preserved_information_float", "preserved_information_double",
     "pick_bits_to_shave_float", "pick_bits_to_shave_double",
     "pick_bits_to_shave_binary_search_float", "pick_bits_to_shave_binary_search_double",
@@ -119,21 +123,21 @@ def shave(A, n_elem, n, config_path):
     else:
         raise ValueError(f"Unsupported dtype for shave: {dtype_str}")
 
-def bit_rounding(A, n_elem, n):
+def bit_rounding(A, n_elem, n, config_path):
     dtype_str = _infer_dtype(A)
     if dtype_str == "float":
         bit_rounding_result = np.zeros(n_elem, dtype=np.float32)
         c_func = real_info.bit_rounding_float
-        c_func.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_size_t, ctypes.c_int, ctypes.POINTER(ctypes.c_float)]
+        c_func.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_size_t, ctypes.c_int, ctypes.POINTER(ctypes.c_float), ctypes.c_char_p]
         c_func.restype = None
-        c_func(A.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), n_elem, n, bit_rounding_result.ctypes.data_as(ctypes.POINTER(ctypes.c_float)))
+        c_func(A.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), n_elem, n, bit_rounding_result.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), config_path.encode('utf-8'))
         return bit_rounding_result
     elif dtype_str == "double":
         bit_rounding_result = np.zeros(n_elem, dtype=np.float64)
         c_func = real_info.bit_rounding_double
-        c_func.argtypes = [ctypes.POINTER(ctypes.c_double), ctypes.c_size_t, ctypes.c_int, ctypes.POINTER(ctypes.c_double)]
+        c_func.argtypes = [ctypes.POINTER(ctypes.c_double), ctypes.c_size_t, ctypes.c_int, ctypes.POINTER(ctypes.c_double), ctypes.c_char_p]
         c_func.restype = None
-        c_func(A.ctypes.data_as(ctypes.POINTER(ctypes.c_double)), n_elem, n, bit_rounding_result.ctypes.data_as(ctypes.POINTER(ctypes.c_double)))
+        c_func(A.ctypes.data_as(ctypes.POINTER(ctypes.c_double)), n_elem, n, bit_rounding_result.ctypes.data_as(ctypes.POINTER(ctypes.c_double)), config_path.encode('utf-8'))
         return bit_rounding_result
     else:
         raise ValueError(f"Unsupported dtype for bit_rounding: {dtype_str}")

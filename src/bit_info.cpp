@@ -3,8 +3,8 @@
 namespace {
 	thread_local std::string fixed_point_error_message;
 
-	// Keep fixed-point validation exceptions inside the C++ boundary. Existing
-	// C signatures stay unchanged; Python translates the message to ValueError.
+	// Keep fixed-point validation exceptions inside the C++ boundary.
+	// Python translates the message to ValueError.
 	template <typename Function>
 	auto fixed_point_call(Function function) -> std::invoke_result_t<Function> {
 		using Result = std::invoke_result_t<Function>;
@@ -53,50 +53,82 @@ extern "C" {
 }
 
 extern "C" {
-	void halfshave_float(float *A, size_t n_elem, int n, float *halfshaved) {
-		halfshave_template<float>(A, n_elem, n, halfshaved);
+	void halfshave_float(float *A, size_t n_elem, int n, float *halfshaved, char *config_file) {
+		fixed_point_call([&] {
+			if (n_elem == 0) return;
+			real_info_params<float> params(config_file, A, n_elem);
+			halfshave_bits<float>(params, A, n_elem, n, halfshaved);
+		});
 	}
 }
 
 extern "C" {
-	void halfshave_double(double *A, size_t n_elem, int n, double *halfshaved) {
-		halfshave_template<double>(A, n_elem, n, halfshaved);
+	void halfshave_double(double *A, size_t n_elem, int n, double *halfshaved, char *config_file) {
+		fixed_point_call([&] {
+			if (n_elem == 0) return;
+			real_info_params<double> params(config_file, A, n_elem);
+			halfshave_bits<double>(params, A, n_elem, n, halfshaved);
+		});
 	}
 }
 
 extern "C" {
-	void bit_rounding_float(float *A, size_t n_elem, int n, float *bit_rounding_result) {
-		bit_rounding_template<float>(A, n_elem, n, bit_rounding_result);
+	void bit_rounding_float(float *A, size_t n_elem, int n, float *bit_rounding_result, char *config_file) {
+		fixed_point_call([&] {
+			if (n_elem == 0) return;
+			real_info_params<float> params(config_file, A, n_elem);
+			bit_rounding_bits<float>(params, A, n_elem, n, bit_rounding_result);
+		});
 	}
 }
 
 extern "C" {
-	void bit_rounding_double(double *A, size_t n_elem, int n, double *bit_rounding_result) {
-		bit_rounding_template<double>(A, n_elem, n, bit_rounding_result);
+	void bit_rounding_double(double *A, size_t n_elem, int n, double *bit_rounding_result, char *config_file) {
+		fixed_point_call([&] {
+			if (n_elem == 0) return;
+			real_info_params<double> params(config_file, A, n_elem);
+			bit_rounding_bits<double>(params, A, n_elem, n, bit_rounding_result);
+		});
 	}
 }
 
 extern "C" {
-	void set_float(float *A, size_t n_elem, int n, float *set) {
-		set_template<float>(A, n_elem, n, set);
+	void set_float(float *A, size_t n_elem, int n, float *set, char *config_file) {
+		fixed_point_call([&] {
+			if (n_elem == 0) return;
+			real_info_params<float> params(config_file, A, n_elem);
+			set_bits<float>(params, A, n_elem, n, set);
+		});
 	}
 }
 
 extern "C" {
-	void set_double(double *A, size_t n_elem, int n, double *set) {
-		set_template<double>(A, n_elem, n, set);
+	void set_double(double *A, size_t n_elem, int n, double *set, char *config_file) {
+		fixed_point_call([&] {
+			if (n_elem == 0) return;
+			real_info_params<double> params(config_file, A, n_elem);
+			set_bits<double>(params, A, n_elem, n, set);
+		});
 	}
 }
 
 extern "C" {
-	void groom_float(float *A, size_t n_elem, int n, float *groomed) {
-		groom_template<float>(A, n_elem, n, groomed);
+	void groom_float(float *A, size_t n_elem, int n, float *groomed, char *config_file) {
+		fixed_point_call([&] {
+			if (n_elem == 0) return;
+			real_info_params<float> params(config_file, A, n_elem);
+			groom_bits<float>(params, A, n_elem, n, groomed);
+		});
 	}
 }
 
 extern "C" {
-	void groom_double(double *A, size_t n_elem, int n, double *groomed) {
-		groom_template<double>(A, n_elem, n, groomed);
+	void groom_double(double *A, size_t n_elem, int n, double *groomed, char *config_file) {
+		fixed_point_call([&] {
+			if (n_elem == 0) return;
+			real_info_params<double> params(config_file, A, n_elem);
+			groom_bits<double>(params, A, n_elem, n, groomed);
+		});
 	}
 }
 

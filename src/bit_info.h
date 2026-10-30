@@ -607,6 +607,26 @@ void set_bits(const real_info_params<T> &RI_params, T *A, size_t n_elem, int n, 
 	}
 }
 
+/**
+ * @brief Alternate setting and shaving the lowest `n` bits of array elements.
+ * @param RI_params Real information parameters.
+ * @param A Input array of type `T`.
+ * @param n_elem Number of elements in the array.
+ * @param n Number of least-significant bits to modify.
+ * @param groomed Output array, with even-indexed elements set and odd ones shaved.
+ */
+template <typename T>
+void groom_bits(const real_info_params<T> &RI_params, T *A, size_t n_elem, int n, T *groomed) {
+	if (n_elem == 0 || copy_constant_fixed_point(RI_params, A, n_elem, groomed)) return;
+	for (size_t i = 0; i < n_elem; i++) {
+		if (i % 2 == 0) {
+			set_bits<T>(RI_params, A + i, 1, n, groomed + i);
+		} else {
+			shave_bits<T>(RI_params, A + i, 1, n, groomed + i);
+		}
+	}
+}
+
 static int bit_pair_count_calls = 0;
 
 template<std::floating_point T>

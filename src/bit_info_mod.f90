@@ -1,7 +1,7 @@
 module bit_info
 
 use kinds, only: ccs_int
-use iso_c_binding, only: c_int, c_float, c_double
+use iso_c_binding, only: c_int, c_float, c_double, c_char, c_size_t
 
 implicit none
 
@@ -18,25 +18,28 @@ interface
     real(c_float), dimension(*) :: shaved
   end subroutine 
 
-  module subroutine halfshave_float(a, n_elem, n, halfshaved) bind(C, name="halfshave_float")
+  module subroutine halfshave_float(a, n_elem, n, halfshaved, config_file) bind(C, name="halfshave_float")
     real(c_float), dimension(*) :: a
-    integer(c_int), value :: n_elem
+    integer(c_size_t), value :: n_elem
     integer(c_int), value :: n
     real(c_float), dimension(*) :: halfshaved
+    character(kind=c_char), dimension(*) :: config_file
   end subroutine 
 
-  module subroutine set_float(a, n_elem, n, set) bind(C, name="set_float")
+  module subroutine set_float(a, n_elem, n, set, config_file) bind(C, name="set_float")
     real(c_float), dimension(*) :: a
-    integer(c_int), value :: n_elem
+    integer(c_size_t), value :: n_elem
     integer(c_int), value :: n
     real(c_float), dimension(*) :: set
+    character(kind=c_char), dimension(*) :: config_file
   end subroutine 
 
-  module subroutine groom_float(a, n_elem, n, groomed) bind(C, name="groom_float")
+  module subroutine groom_float(a, n_elem, n, groomed, config_file) bind(C, name="groom_float")
     real(c_float), dimension(*) :: a
-    integer(c_int), value :: n_elem
+    integer(c_size_t), value :: n_elem
     integer(c_int), value :: n
     real(c_float), dimension(*) :: groomed
+    character(kind=c_char), dimension(*) :: config_file
   end subroutine 
 
   module function preserved_information_float(a, b, n_elem) result(preserved) bind(C, name="preserved_information_float")
@@ -61,25 +64,28 @@ interface
     real(c_double), dimension(*) :: shaved
   end subroutine 
 
-  module subroutine halfshave_double(a, n_elem, n, halfshaved) bind(C, name="halfshave_double")
+  module subroutine halfshave_double(a, n_elem, n, halfshaved, config_file) bind(C, name="halfshave_double")
     real(c_double), dimension(*) :: a
-    integer(c_int), value :: n_elem
+    integer(c_size_t), value :: n_elem
     integer(c_int), value :: n
     real(c_double), dimension(*) :: halfshaved
+    character(kind=c_char), dimension(*) :: config_file
   end subroutine 
 
-  module subroutine set_double(a, n_elem, n, set) bind(C, name="set_double")
+  module subroutine set_double(a, n_elem, n, set, config_file) bind(C, name="set_double")
     real(c_double), dimension(*) :: a
-    integer(c_int), value :: n_elem
+    integer(c_size_t), value :: n_elem
     integer(c_int), value :: n
     real(c_double), dimension(*) :: set
+    character(kind=c_char), dimension(*) :: config_file
   end subroutine 
 
-  module subroutine groom_double(a, n_elem, n, groomed) bind(C, name="groom_double")
+  module subroutine groom_double(a, n_elem, n, groomed, config_file) bind(C, name="groom_double")
     real(c_double), dimension(*) :: a
-    integer(c_int), value :: n_elem
+    integer(c_size_t), value :: n_elem
     integer(c_int), value :: n
     real(c_double), dimension(*) :: groomed
+    character(kind=c_char), dimension(*) :: config_file
   end subroutine 
 
   module function preserved_information_double(a, b, n_elem) result(preserved) bind(C, name="preserved_information_double")
