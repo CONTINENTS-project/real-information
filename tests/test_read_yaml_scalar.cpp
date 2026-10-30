@@ -5,10 +5,10 @@ int main() {
     const std::string cfg = test_data_path("test_yaml_override.yaml");
 
     // Global values
-    bool mantissa_global = false;
-    bool mask_zero_global = true;
-    bool fixed_point_global = true;
-    int fixed_point_scale_bits_global = 10;
+    bool mantissa_global = true;
+    bool mask_zero_global = false;
+    bool fixed_point_global = false;
+    int fixed_point_scale_bits_global = -1;
 
     read_yaml_scalar(cfg.c_str(), "mantissa_only", &mantissa_global);
     read_yaml_scalar(cfg.c_str(), "mask_zero", &mask_zero_global);

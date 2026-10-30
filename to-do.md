@@ -126,7 +126,13 @@ still pending.
 - [ ] TODO after all verification testing is complete: report configuration
   errors through the C, Python, and Fortran bindings. Until then, do not rely on
   recoverable configuration errors through those bindings.
-- [ ] Enforce global and variable configuration scopes.
+- [x] Enforce global and variable configuration scopes with a dependency-free
+  parser for top-level scalars and a `variables` sequence. Validate indentation,
+  duplicate keys/names, required variable names, and known boolean settings in
+  every scope. Preserve quoted strings/comments; reject unsupported YAML
+  structures. Add [tests/test_config_scopes.cpp](tests/test_config_scopes.cpp).
+  The scope, conversion, and existing parser tests passed when compiled and run
+  individually; complete verification remains pending.
 - [ ] TODO after all verification testing is complete: connect variable overrides
   to the public API. Existing exported entry points still use global settings.
 - [ ] Implement or remove the unused `fixed_point_scale_bits` setting.

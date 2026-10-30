@@ -1,5 +1,47 @@
 C++ implementation of bitinformation.jl from [Klower et al. 2021](https://www.nature.com/articles/s43588-021-00156-2)
 
+## Configuration
+
+`real_info_params` requires the top-level boolean settings `mantissa_only`,
+`mask_zero`, and `fixed_point`. Missing files, required keys, invalid conversions,
+and unsupported configuration structures throw C++ `configuration_error`.
+Recoverable reporting through the C/Python/Fortran bindings is still to-do after
+verification testing; callers must not assume those bindings can recover yet.
+
+The dependency-free reader supports top-level scalar mappings and an optional
+`variables` sequence of scalar mappings:
+
+```yaml
+mantissa_only: false
+mask_zero: true
+fixed_point: false
+
+variables:
+  - var_name: PRECC
+    mantissa_only: true
+    mask_zero: false
+```
+
+Each entry needs a unique, nonempty `var_name`. Direct C++ `read_yaml_scalar`
+calls can select that name; absent overrides and unlisted names inherit only
+top-level settings. A null/empty name selects globals. Public bindings do not
+accept a variable name yet. Shared GenTS scalar settings such as `real_info`
+and `default_real_info` are accepted.
+
+Use spaces for consistent indentation; both indented and indentless sequences
+are supported. Use `variables: []` for an empty sequence. Duplicate keys/names,
+arbitrary nested mappings/sequences, flow collections, null values, anchors,
+tags, and multiline scalars are rejected. This is a defined YAML subset, not a
+general-purpose YAML parser.
+
+Strings can be plain, single-quoted (with `''` for an apostrophe), or double-quoted
+(with `\"`, `\\`, `\n`, `\r`, and `\t` escapes). A `#` starts a comment outside
+quotes when preceded by whitespace or at the start of a scalar. Numeric and
+boolean conversions require unquoted values. Booleans accept `true`/`false` and
+their title/upper-case spellings. Numbers use decimal notation, optionally
+scientific notation for floating point, and must be finite and fit their target
+type. Malformed values are rejected rather than partially converted.
+
 ## Fortran interface
 
 Compile `src/bit_info_mod.f90` with the same Fortran compiler used for the

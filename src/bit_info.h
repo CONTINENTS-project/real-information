@@ -43,7 +43,7 @@ public:
 template <typename T>
 T parse_yaml_scalar(const std::string &value, const std::string &location) {
 	if constexpr (std::is_same_v<T, std::string>) {
-		if (!value.empty()) return value;
+		return value;
 	} else if constexpr (std::is_same_v<T, bool>) {
 		if (value == "true" || value == "True" || value == "TRUE") return true;
 		if (value == "false" || value == "False" || value == "FALSE") return false;
@@ -69,154 +69,260 @@ T parse_yaml_scalar(const std::string &value, const std::string &location) {
 	throw configuration_error(location + ": invalid scalar '" + value + "'");
 }
 
-// Retain the source once so parameter construction does not reopen it per flag.
-struct yaml_config {
-	std::string filename;
-	std::vector<std::string> lines;
+// Dependency-free subset: top-level scalars and a variables sequence of scalar maps.
+// Unsupported YAML structures are rejected rather than searched as flat text.
+class yaml_config {
+    struct scalar {
+        std::string value;
+        size_t line;
+        bool quoted = false;
+    };
+    using scalar_map = std::unordered_map<std::string, scalar>;
+    scalar_map globals;
+    std::unordered_map<std::string, scalar_map> variables;
 
-	explicit yaml_config(const char *path) {
-		if (path == nullptr || *path == '\0') {
-			throw configuration_error("Configuration path must be nonempty");
-		}
-		filename = path;
-		std::ifstream file(path);
-		if (!file.is_open()) throw configuration_error(filename + ": could not open configuration file");
-		load(file);
-	}
+    std::string location(size_t line) const {
+        return filename + ":" + std::to_string(line);
+    }
 
-	yaml_config(std::istream &input, const std::string &source) : filename(source) {
-		load(input);
-	}
+    [[noreturn]] void fail(size_t line, const std::string &message) const {
+        throw configuration_error(location(line) + ": " + message);
+    }
 
-private:
-	void load(std::istream &input) {
-		std::string line;
-		while (std::getline(input, line)) {
-			line.erase(line.find('#') == std::string::npos ? line.size() : line.find('#'));
-			lines.push_back(line);
-		}
-		if (input.bad() || (input.fail() && !input.eof())) {
-			throw configuration_error(filename + ": failed to read configuration file");
-		}
-	}
+    static bool space(char character) {
+        return character == ' ' || character == '\t';
+    }
+
+    scalar parse_scalar(const std::string &text, size_t line) const {
+        scalar result{"", line};
+        if (text.empty() || text.front() == '#') return result;
+        if (text.front() == '\'' || text.front() == '"') {
+            result.quoted = true;
+            const char quote = text.front();
+            for (size_t i = 1; i < text.size(); ++i) {
+                char character = text[i];
+                if (character == quote) {
+                    if (quote == '\'' && i + 1 < text.size() && text[i + 1] == '\'') {
+                        result.value += '\'';
+                        ++i;
+                        continue;
+                    }
+                    if (i + 1 < text.size() && !space(text[i + 1])) {
+                        fail(line, "expected whitespace after quoted scalar");
+                    }
+                    const auto trailing = yaml_trim(text.substr(i + 1));
+                    if (!trailing.empty() && trailing.front() != '#') {
+                        fail(line, "unexpected text after quoted scalar");
+                    }
+                    return result;
+                }
+                if (quote == '"' && character == '\\') {
+                    if (++i == text.size()) fail(line, "unfinished quoted escape");
+                    switch (text[i]) {
+                        case '"': character = '"'; break;
+                        case '\\': character = '\\'; break;
+                        case 'n': character = '\n'; break;
+                        case 'r': character = '\r'; break;
+                        case 't': character = '\t'; break;
+                        default: fail(line, "unsupported quoted escape");
+                    }
+                }
+                result.value += character;
+            }
+            fail(line, "unterminated quoted scalar");
+        }
+        size_t comment = std::string::npos;
+        for (size_t i = 0; i < text.size(); ++i) {
+            if (text[i] == '#' && (i == 0 || space(text[i - 1]))) {
+                comment = i;
+                break;
+            }
+        }
+        result.value = yaml_trim(text.substr(0, comment));
+        return result;
+    }
+
+    std::pair<std::string, scalar> parse_entry(const std::string &text, size_t line) const {
+        const size_t colon = text.find(':');
+        if (colon == std::string::npos || (colon + 1 < text.size() && !space(text[colon + 1]))) {
+            fail(line, "expected 'key: value'");
+        }
+        const std::string key = yaml_trim(text.substr(0, colon));
+        if (key.empty() || key.find_first_not_of(
+                "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-") != std::string::npos) {
+            fail(line, "expected an unquoted scalar key");
+        }
+        return {key, parse_scalar(yaml_trim(text.substr(colon + 1)), line)};
+    }
+
+    template <typename T>
+    T convert(const scalar &value, const std::string &key, const std::string &scope) const {
+        const std::string context = location(value.line) + ": " + scope + key;
+        if constexpr (!std::is_same_v<T, std::string>) {
+            if (value.quoted) throw configuration_error(context + ": expected an unquoted scalar");
+        }
+        return parse_yaml_scalar<T>(value.value, context);
+    }
+
+    void insert(scalar_map &fields, const std::string &key, scalar value) const {
+        if (!value.quoted) {
+            if (value.value.empty()) fail(value.line, key + ": expected a scalar value");
+            if (value.value.find_first_of("[{}]|>&*!%@`") == 0 || value.value == "~" ||
+                value.value == "null" || value.value == "Null" || value.value == "NULL" ||
+                value.value == "-" || value.value.compare(0, 2, "- ") == 0) {
+                fail(value.line, key + ": unsupported YAML scalar or structure");
+            }
+            for (size_t i = 0; i < value.value.size(); ++i) {
+                if (value.value[i] == ':' && (i + 1 == value.value.size() || space(value.value[i + 1]))) {
+                    fail(value.line, key + ": nested mappings require an unsupported YAML structure");
+                }
+            }
+        }
+        const auto inserted = fields.emplace(key, value);
+        if (!inserted.second) fail(value.line, "duplicate key '" + key + "'");
+    }
+
+    void validate_flags(const scalar_map &fields, const std::string &scope) const {
+        for (const char *key : {"mantissa_only", "mask_zero", "fixed_point"}) {
+            const auto found = fields.find(key);
+            if (found != fields.end()) convert<bool>(found->second, key, scope);
+        }
+    }
+
+    void load(std::istream &input) {
+        const size_t unset = std::string::npos;
+        bool in_variables = false;
+        bool seen_variables = false;
+        bool have_item = false;
+        size_t section_line = 0;
+        size_t item_line = 0;
+        size_t item_indent = unset;
+        size_t field_indent = unset;
+        scalar_map item;
+        auto finish_item = [&] {
+            if (!have_item) return;
+            const auto name = item.find("var_name");
+            if (name == item.end() || yaml_trim(name->second.value).empty()) {
+                fail(item_line, "each variables entry needs a nonempty var_name");
+            }
+            const auto variable = name->second.value;
+            validate_flags(item, "variables[" + variable + "].");
+            if (!variables.emplace(variable, std::move(item)).second) {
+                fail(item_line, "duplicate variable '" + variable + "'");
+            }
+            item.clear();
+            have_item = false;
+        };
+        auto finish_section = [&] {
+            if (in_variables && item_indent == unset) {
+                fail(section_line, "variables must contain a sequence; use [] for an empty sequence");
+            }
+            finish_item();
+            in_variables = false;
+        };
+        std::string line;
+        size_t line_number = 0;
+        while (std::getline(input, line)) {
+            ++line_number;
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            const size_t indent = line.find_first_not_of(' ');
+            if (indent == unset) continue;
+            if (line[indent] == '\t') fail(line_number, "tabs are not allowed in indentation");
+            const auto content = yaml_trim(line.substr(indent));
+            if (content.empty() || content.front() == '#') continue;
+            const bool sequence_item = content.front() == '-' &&
+                (content.size() == 1 || space(content[1]));
+            if (sequence_item) {
+                if (!in_variables) fail(line_number, "sequence item outside variables");
+                if (item_indent == unset) item_indent = indent;
+                if (indent != item_indent) fail(line_number, "inconsistent variables sequence indentation");
+                finish_item();
+                have_item = true;
+                item_line = line_number;
+                field_indent = unset;
+                const auto field_start = line.find_first_not_of(' ', indent + 1);
+                if (field_start == unset || line[field_start] == '#') continue;
+                if (line[field_start] == '\t') fail(line_number, "tabs are not allowed in indentation");
+                field_indent = field_start;
+                const auto entry = parse_entry(yaml_trim(line.substr(field_start)), line_number);
+                insert(item, entry.first, entry.second);
+            } else if (indent == 0) {
+                finish_section();
+                const auto entry = parse_entry(content, line_number);
+                if (entry.first == "variables") {
+                    if (seen_variables) fail(line_number, "duplicate key 'variables'");
+                    seen_variables = true;
+                    if (entry.second.quoted || (!entry.second.value.empty() && entry.second.value != "[]")) {
+                        fail(line_number, "variables must be a sequence of scalar mappings");
+                    }
+                    in_variables = entry.second.value.empty();
+                    section_line = line_number;
+                    item_indent = unset;
+                } else {
+                    insert(globals, entry.first, entry.second);
+                }
+            } else {
+                if (!in_variables || !have_item || indent <= item_indent) {
+                    fail(line_number, "unexpected indentation outside a variables entry");
+                }
+                if (field_indent == unset) field_indent = indent;
+                if (indent != field_indent) fail(line_number, "inconsistent variable field indentation");
+                const auto entry = parse_entry(content, line_number);
+                insert(item, entry.first, entry.second);
+            }
+        }
+        if (input.bad() || (input.fail() && !input.eof())) {
+            throw configuration_error(filename + ": failed to read configuration file");
+        }
+        finish_section();
+        validate_flags(globals, "");
+    }
+
+public:
+    std::string filename;
+
+    explicit yaml_config(const char *path) {
+        if (path == nullptr || *path == '\0') {
+            throw configuration_error("Configuration path must be nonempty");
+        }
+        filename = path;
+        std::ifstream file(path);
+        if (!file.is_open()) throw configuration_error(filename + ": could not open configuration file");
+        load(file);
+    }
+
+    yaml_config(std::istream &input, const std::string &source) : filename(source) {
+        load(input);
+    }
+
+    template <typename T>
+    T read(const std::string &key, const char *var_name = nullptr) const {
+        if (var_name != nullptr && *var_name != '\0') {
+            const auto variable = variables.find(var_name);
+            if (variable != variables.end()) {
+                const auto value = variable->second.find(key);
+                if (value != variable->second.end()) {
+                    return convert<T>(value->second, key, "variables[" + std::string(var_name) + "].");
+                }
+            }
+        }
+        const auto value = globals.find(key);
+        if (value != globals.end()) return convert<T>(value->second, key, "");
+        throw configuration_error(filename + ": required global key '" + key + "' not found");
+    }
 };
 
-/**
- * @brief Reads a required scalar, with an optional variable override.
- *
- * Only supports one "key: value" pair per line; nested/list structures are not handled.
- * Lines are trimmed of trailing '#' comments before parsing.
- *
- * @tparam T Type of the scalar to parse (bool, integral, floating-point, or std::string).
- * @param config Loaded configuration source.
- * @param key Key to search for.
- * @param out Pointer to store the parsed value; unchanged on configuration errors.
- */
+// Output remains unchanged on errors. Null/empty names select only global settings.
 template <typename T>
 void read_yaml_scalar(const yaml_config &config, const std::string &key, T *out, const char *var_name = nullptr) {
-	if (out == nullptr) throw configuration_error(config.filename + ": null scalar output for " + key);
-	const auto &lines = config.lines;
-	auto parse_and_set = [&](const std::string &value, size_t line_number) {
-		*out = parse_yaml_scalar<T>(value, config.filename + ":" + std::to_string(line_number) + ": " + key);
-	};
-
-	auto leading_spaces = [](const std::string &s) {
-		size_t p = s.find_first_not_of(' ');
-		if (p == std::string::npos) return (int)s.size();
-		return (int)p;
-	};
-
-	// If a variable name is provided, attempt to find an override in the variables list
-	if (var_name != nullptr) {
-		// locate 'variables:' line
-		for (size_t i = 0; i < lines.size(); ++i) {
-			if (yaml_trim(lines[i]) == "variables:") {
-				// parse list items
-				size_t j = i + 1;
-				while (j < lines.size()) {
-					// skip empty lines
-					if (yaml_trim(lines[j]).empty()) { ++j; continue; }
-						int indent = leading_spaces(lines[j]);
-						size_t first_non = lines[j].find_first_not_of(" \t");
-						if (first_non == std::string::npos) break;
-					// if this line is not a list item and not indented, variables list ended
-					if (lines[j][first_non] != '-' && first_non == 0) break;
-
-					if (lines[j][first_non] == '-') {
-						// Start a new block. Remove the '-' to simplify parsing
-						std::vector<std::pair<std::string, size_t>> block;
-						std::string item = lines[j];
-						item.erase((size_t)first_non, 1);
-						block.emplace_back(item, j + 1);
-						++j;
-						// collect indented lines belonging to this block
-						while (j < lines.size()) {
-							int lead2 = leading_spaces(lines[j]);
-								size_t first_non2 = lines[j].find_first_not_of(" \t");
-								if (first_non2 == std::string::npos) { ++j; continue; }
-							// new list item at same indent -> break
-							if (lines[j][first_non2] == '-' && lead2 == indent) break;
-							// top-level unindented -> end of variables list
-							if (first_non2 == 0) break;
-							// otherwise this line belongs to the current block
-							block.emplace_back(lines[j], j + 1);
-							++j;
-						}
-
-						// parse block into key->value pairs
-						std::string block_var_name;
-						std::unordered_map<std::string,std::string> kv;
-						std::unordered_map<std::string, size_t> key_lines;
-						for (const auto &[bl, line_number] : block) {
-							size_t colon_pos = bl.find(':');
-							if (colon_pos == std::string::npos) continue;
-							std::string k = yaml_trim(bl.substr(0, colon_pos));
-							std::string v = yaml_trim(bl.substr(colon_pos + 1));
-							if (!k.empty()) {
-								kv[k] = v;
-								key_lines[k] = line_number;
-								if (k == "var_name") block_var_name = v;
-							}
-						}
-
-						if (!block_var_name.empty() && block_var_name == var_name) {
-							auto it = kv.find(key);
-							if (it != kv.end()) {
-									parse_and_set(it->second, key_lines.at(key));
-									return;
-							}
-							// matching variable found but no override for key: fall through to global lookup
-							break;
-						}
-					} else {
-						// not a list item; move on
-						++j;
-					}
-				}
-				break; // done scanning variables section
-			}
-		}
-	}
-
-	// Fallback: search for global key anywhere in the file
-	for (size_t index = 0; index < lines.size(); ++index) {
-		const auto &ln = lines[index];
-		size_t colon_pos = ln.find(':');
-		if (colon_pos == std::string::npos) continue;
-		std::string k = yaml_trim(ln.substr(0, colon_pos));
-		if (k != key) continue;
-		std::string v = yaml_trim(ln.substr(colon_pos + 1));
-		parse_and_set(v, index + 1);
-		return;
-	}
-
-	throw configuration_error(config.filename + ": required key '" + key + "' not found");
+    if (out == nullptr) throw configuration_error(config.filename + ": null scalar output for " + key);
+    *out = config.read<T>(key, var_name);
 }
 
 template <typename T>
 void read_yaml_scalar(const char *config_file, const std::string &key, T *out, const char *var_name = nullptr) {
-	const yaml_config config(config_file);
-	read_yaml_scalar(config, key, out, var_name);
+    const yaml_config config(config_file);
+    read_yaml_scalar(config, key, out, var_name);
 }
 
 class fixed_point_error : public std::invalid_argument {
