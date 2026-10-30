@@ -1,6 +1,7 @@
 #include <iostream>
 #include <cmath>
 #include <fstream>
+#include <filesystem>
 #include <string>
 #include <stdexcept>
 #include <vector>
@@ -8,6 +9,10 @@
 #include <cctype>
 
 const size_t n_elements = 1000;
+
+std::string test_data_path(const char *filename) {
+	return (std::filesystem::path(__FILE__).parent_path() / filename).string();
+}
 
 void test_assert(bool condition, const char* file, int line, std::string message) {
 	if (!condition) {

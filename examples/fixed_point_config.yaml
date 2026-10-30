@@ -1,0 +1,7 @@
+use_real_info: true
+default_real_info: 0.99
+real_info_eval_freq: 1
+
+mantissa_only: false
+mask_zero: false
+fixed_point: true

@@ -2,19 +2,517 @@
 #define BIT_INFO_H
 
 #include <algorithm>
+#include <array>
+#include <bit>
+#include <charconv>
 #include <concepts>
 #include <climits>
-#include <bitset>
+#include <limits>
 #include <iostream>
+#include <fstream>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+#include <unordered_map>
+#include <type_traits>
 #include <cmath>
+#include <cassert>
 #include <cstring>
+#include <cstdint>
+#include <stdexcept>
 #include <mpi.h>
 
-inline int get_n_exponent_bits(int nbits);
-const bool mantissa_only = true;
+// Set EPS
+static const float EPS = 1e-16;
 
-void get_start_end_bits(int n_bits, int *start, int *end) {
-	if (mantissa_only) {
+inline std::string yaml_trim(const std::string &s) {
+	size_t start = s.find_first_not_of(" \t\r\n");
+	if (start == std::string::npos) return "";
+	size_t end = s.find_last_not_of(" \t\r\n");
+	return s.substr(start, end - start + 1);
+}
+
+class configuration_error : public std::invalid_argument {
+public:
+	using std::invalid_argument::invalid_argument;
+};
+
+// Convert the entire scalar directly into its destination type, without narrowing.
+template <typename T>
+T parse_yaml_scalar(const std::string &value, const std::string &location) {
+	if constexpr (std::is_same_v<T, std::string>) {
+		return value;
+	} else if constexpr (std::is_same_v<T, bool>) {
+		if (value == "true" || value == "True" || value == "TRUE") return true;
+		if (value == "false" || value == "False" || value == "FALSE") return false;
+	} else if constexpr (std::is_integral_v<T> || std::is_floating_point_v<T>) {
+		std::string_view text(value);
+		if (!text.empty() && text.front() == '+') {
+			text.remove_prefix(1);
+			if (text.empty() || text.front() == '+' || text.front() == '-') {
+				throw configuration_error(location + ": invalid numeric scalar '" + value + "'");
+			}
+		}
+		if (!text.empty()) {
+			T parsed{};
+			const auto result = std::from_chars(text.data(), text.data() + text.size(), parsed);
+			if (result.ec == std::errc{} && result.ptr == text.data() + text.size()) {
+				if constexpr (std::is_integral_v<T>) return parsed;
+				else if (std::isfinite(parsed)) return parsed;
+			}
+		}
+	} else {
+		static_assert(!sizeof(T), "Unsupported type for read_yaml_scalar");
+	}
+	throw configuration_error(location + ": invalid scalar '" + value + "'");
+}
+
+// Dependency-free subset: top-level scalars and a variables sequence of scalar maps.
+// Unsupported YAML structures are rejected rather than searched as flat text.
+class yaml_config {
+    struct scalar {
+        std::string value;
+        size_t line;
+        bool quoted = false;
+    };
+    using scalar_map = std::unordered_map<std::string, scalar>;
+    scalar_map globals;
+    std::unordered_map<std::string, scalar_map> variables;
+
+    std::string location(size_t line) const {
+        return filename + ":" + std::to_string(line);
+    }
+
+    [[noreturn]] void fail(size_t line, const std::string &message) const {
+        throw configuration_error(location(line) + ": " + message);
+    }
+
+    static bool space(char character) {
+        return character == ' ' || character == '\t';
+    }
+
+    scalar parse_scalar(const std::string &text, size_t line) const {
+        scalar result{"", line};
+        if (text.empty() || text.front() == '#') return result;
+        if (text.front() == '\'' || text.front() == '"') {
+            result.quoted = true;
+            const char quote = text.front();
+            for (size_t i = 1; i < text.size(); ++i) {
+                char character = text[i];
+                if (character == quote) {
+                    if (quote == '\'' && i + 1 < text.size() && text[i + 1] == '\'') {
+                        result.value += '\'';
+                        ++i;
+                        continue;
+                    }
+                    if (i + 1 < text.size() && !space(text[i + 1])) {
+                        fail(line, "expected whitespace after quoted scalar");
+                    }
+                    const auto trailing = yaml_trim(text.substr(i + 1));
+                    if (!trailing.empty() && trailing.front() != '#') {
+                        fail(line, "unexpected text after quoted scalar");
+                    }
+                    return result;
+                }
+                if (quote == '"' && character == '\\') {
+                    if (++i == text.size()) fail(line, "unfinished quoted escape");
+                    switch (text[i]) {
+                        case '"': character = '"'; break;
+                        case '\\': character = '\\'; break;
+                        case 'n': character = '\n'; break;
+                        case 'r': character = '\r'; break;
+                        case 't': character = '\t'; break;
+                        default: fail(line, "unsupported quoted escape");
+                    }
+                }
+                result.value += character;
+            }
+            fail(line, "unterminated quoted scalar");
+        }
+        size_t comment = std::string::npos;
+        for (size_t i = 0; i < text.size(); ++i) {
+            if (text[i] == '#' && (i == 0 || space(text[i - 1]))) {
+                comment = i;
+                break;
+            }
+        }
+        result.value = yaml_trim(text.substr(0, comment));
+        return result;
+    }
+
+    std::pair<std::string, scalar> parse_entry(const std::string &text, size_t line) const {
+        const size_t colon = text.find(':');
+        if (colon == std::string::npos || (colon + 1 < text.size() && !space(text[colon + 1]))) {
+            fail(line, "expected 'key: value'");
+        }
+        const std::string key = yaml_trim(text.substr(0, colon));
+        if (key.empty() || key.find_first_not_of(
+                "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-") != std::string::npos) {
+            fail(line, "expected an unquoted scalar key");
+        }
+        return {key, parse_scalar(yaml_trim(text.substr(colon + 1)), line)};
+    }
+
+    template <typename T>
+    T convert(const scalar &value, const std::string &key, const std::string &scope) const {
+        const std::string context = location(value.line) + ": " + scope + key;
+        if constexpr (!std::is_same_v<T, std::string>) {
+            if (value.quoted) throw configuration_error(context + ": expected an unquoted scalar");
+        }
+        return parse_yaml_scalar<T>(value.value, context);
+    }
+
+    void insert(scalar_map &fields, const std::string &key, scalar value) const {
+        if (key == "fixed_point_scale_bits") {
+            fail(value.line, "fixed_point_scale_bits has been removed; fixed-point uses a fixed 63-bit range mapping");
+        }
+        if (!value.quoted) {
+            if (value.value.empty()) fail(value.line, key + ": expected a scalar value");
+            if (value.value.find_first_of("[{}]|>&*!%@`") == 0 || value.value == "~" ||
+                value.value == "null" || value.value == "Null" || value.value == "NULL" ||
+                value.value == "-" || value.value.compare(0, 2, "- ") == 0) {
+                fail(value.line, key + ": unsupported YAML scalar or structure");
+            }
+            for (size_t i = 0; i < value.value.size(); ++i) {
+                if (value.value[i] == ':' && (i + 1 == value.value.size() || space(value.value[i + 1]))) {
+                    fail(value.line, key + ": nested mappings require an unsupported YAML structure");
+                }
+            }
+        }
+        const auto inserted = fields.emplace(key, value);
+        if (!inserted.second) fail(value.line, "duplicate key '" + key + "'");
+    }
+
+    void validate_flags(const scalar_map &fields, const std::string &scope) const {
+        for (const char *key : {"mantissa_only", "mask_zero", "fixed_point"}) {
+            const auto found = fields.find(key);
+            if (found != fields.end()) convert<bool>(found->second, key, scope);
+        }
+    }
+
+    void load(std::istream &input) {
+        const size_t unset = std::string::npos;
+        bool in_variables = false;
+        bool seen_variables = false;
+        bool have_item = false;
+        size_t section_line = 0;
+        size_t item_line = 0;
+        size_t item_indent = unset;
+        size_t field_indent = unset;
+        scalar_map item;
+        auto finish_item = [&] {
+            if (!have_item) return;
+            const auto name = item.find("var_name");
+            if (name == item.end() || yaml_trim(name->second.value).empty()) {
+                fail(item_line, "each variables entry needs a nonempty var_name");
+            }
+            const auto variable = name->second.value;
+            validate_flags(item, "variables[" + variable + "].");
+            if (!variables.emplace(variable, std::move(item)).second) {
+                fail(item_line, "duplicate variable '" + variable + "'");
+            }
+            item.clear();
+            have_item = false;
+        };
+        auto finish_section = [&] {
+            if (in_variables && item_indent == unset) {
+                fail(section_line, "variables must contain a sequence; use [] for an empty sequence");
+            }
+            finish_item();
+            in_variables = false;
+        };
+        std::string line;
+        size_t line_number = 0;
+        while (std::getline(input, line)) {
+            ++line_number;
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            const size_t indent = line.find_first_not_of(' ');
+            if (indent == unset) continue;
+            if (line[indent] == '\t') fail(line_number, "tabs are not allowed in indentation");
+            const auto content = yaml_trim(line.substr(indent));
+            if (content.empty() || content.front() == '#') continue;
+            const bool sequence_item = content.front() == '-' &&
+                (content.size() == 1 || space(content[1]));
+            if (sequence_item) {
+                if (!in_variables) fail(line_number, "sequence item outside variables");
+                if (item_indent == unset) item_indent = indent;
+                if (indent != item_indent) fail(line_number, "inconsistent variables sequence indentation");
+                finish_item();
+                have_item = true;
+                item_line = line_number;
+                field_indent = unset;
+                const auto field_start = line.find_first_not_of(' ', indent + 1);
+                if (field_start == unset || line[field_start] == '#') continue;
+                if (line[field_start] == '\t') fail(line_number, "tabs are not allowed in indentation");
+                field_indent = field_start;
+                const auto entry = parse_entry(yaml_trim(line.substr(field_start)), line_number);
+                insert(item, entry.first, entry.second);
+            } else if (indent == 0) {
+                finish_section();
+                const auto entry = parse_entry(content, line_number);
+                if (entry.first == "variables") {
+                    if (seen_variables) fail(line_number, "duplicate key 'variables'");
+                    seen_variables = true;
+                    if (entry.second.quoted || (!entry.second.value.empty() && entry.second.value != "[]")) {
+                        fail(line_number, "variables must be a sequence of scalar mappings");
+                    }
+                    in_variables = entry.second.value.empty();
+                    section_line = line_number;
+                    item_indent = unset;
+                } else {
+                    insert(globals, entry.first, entry.second);
+                }
+            } else {
+                if (!in_variables || !have_item || indent <= item_indent) {
+                    fail(line_number, "unexpected indentation outside a variables entry");
+                }
+                if (field_indent == unset) field_indent = indent;
+                if (indent != field_indent) fail(line_number, "inconsistent variable field indentation");
+                const auto entry = parse_entry(content, line_number);
+                insert(item, entry.first, entry.second);
+            }
+        }
+        if (input.bad() || (input.fail() && !input.eof())) {
+            throw configuration_error(filename + ": failed to read configuration file");
+        }
+        finish_section();
+        validate_flags(globals, "");
+    }
+
+public:
+    std::string filename;
+
+    explicit yaml_config(const char *path) {
+        if (path == nullptr || *path == '\0') {
+            throw configuration_error("Configuration path must be nonempty");
+        }
+        filename = path;
+        std::ifstream file(path);
+        if (!file.is_open()) throw configuration_error(filename + ": could not open configuration file");
+        load(file);
+    }
+
+    yaml_config(std::istream &input, const std::string &source) : filename(source) {
+        load(input);
+    }
+
+    template <typename T>
+    T read(const std::string &key, const char *var_name = nullptr) const {
+        if (var_name != nullptr && *var_name != '\0') {
+            const auto variable = variables.find(var_name);
+            if (variable != variables.end()) {
+                const auto value = variable->second.find(key);
+                if (value != variable->second.end()) {
+                    return convert<T>(value->second, key, "variables[" + std::string(var_name) + "].");
+                }
+            }
+        }
+        const auto value = globals.find(key);
+        if (value != globals.end()) return convert<T>(value->second, key, "");
+        throw configuration_error(filename + ": required global key '" + key + "' not found");
+    }
+};
+
+// Output remains unchanged on errors. Null/empty names select only global settings.
+template <typename T>
+void read_yaml_scalar(const yaml_config &config, const std::string &key, T *out, const char *var_name = nullptr) {
+    if (out == nullptr) throw configuration_error(config.filename + ": null scalar output for " + key);
+    *out = config.read<T>(key, var_name);
+}
+
+template <typename T>
+void read_yaml_scalar(const char *config_file, const std::string &key, T *out, const char *var_name = nullptr) {
+    const yaml_config config(config_file);
+    read_yaml_scalar(config, key, out, var_name);
+}
+
+class fixed_point_error : public std::invalid_argument {
+public:
+	using std::invalid_argument::invalid_argument;
+};
+
+// Guarded C entry points print fixed-point validation errors and terminate
+// the process. This accessor is retained for existing bindings and returns
+// nullptr after successful calls.
+extern "C" const char *real_info_last_fixed_point_error();
+
+template <typename T>
+struct fixed_point_range {
+	T minimum{};
+	T maximum{};
+	double width = 0;
+	bool constant = true;
+};
+
+template <typename T>
+fixed_point_range<T> get_fixed_point_init_params(const T *x, size_t n_elem) {
+	static_assert(std::is_same_v<T, float> || std::is_same_v<T, double>);
+	if (n_elem == 0 || x == nullptr) {
+		throw fixed_point_error("Fixed-point initialization requires a nonempty array.");
+	}
+	for (size_t i = 0; i < n_elem; ++i) {
+		if (!std::isfinite(x[i])) {
+			throw fixed_point_error("Fixed-point input must contain only finite values.");
+		}
+	}
+	const auto extrema = std::minmax_element(x, x + n_elem);
+	fixed_point_range<T> range;
+	range.minimum = *extrema.first;
+	range.maximum = *extrema.second;
+	range.constant = range.minimum == range.maximum;
+	if (!range.constant) {
+		// Subtract after promotion so a float range can exceed FLT_MAX safely.
+		range.width = static_cast<double>(range.maximum) - static_cast<double>(range.minimum);
+		if (!std::isfinite(range.width) || range.width <= 0) {
+			throw fixed_point_error("Fixed-point range must have a finite positive width in double precision.");
+		}
+	}
+	return range;
+}
+
+// Empty analysis inputs are invalid; singleton finite arrays are constant.
+template <typename T>
+bool is_constant_array(const T *x, size_t n_elem) {
+	if (n_elem == 0 || x == nullptr) {
+		throw fixed_point_error("Information analysis requires a nonempty array.");
+	}
+	return std::isfinite(x[0]) &&
+		std::all_of(x + 1, x + n_elem, [first = x[0]](T value) { return value == first; });
+}
+
+template <typename T>
+class real_info_params {
+	private:
+	    char *config_file = nullptr;
+
+		void load_configuration() {
+			const yaml_config config(config_file);
+			read_yaml_scalar(config, "mantissa_only", &mantissa_only);
+			read_yaml_scalar(config, "mask_zero", &mask_zero);
+			read_yaml_scalar(config, "fixed_point", &fixed_point);
+		}
+
+	public:
+	    bool mantissa_only = false;
+		bool mask_zero = false;
+		bool fixed_point = false;
+		fixed_point_range<T> fixed_range{};
+	
+		real_info_params(char *config_file) {
+			this->config_file = config_file;
+			load_configuration();
+			if (fixed_point) {
+				throw fixed_point_error("Fixed-point initialization requires input data.");
+			}
+		}
+
+		real_info_params(char *config_file, T *data, size_t n_elem) {
+			this->config_file = config_file;
+			load_configuration();
+			if (fixed_point) {
+				fixed_range = get_fixed_point_init_params(data, n_elem);
+			}
+		}
+};
+
+template <typename T>
+bool copy_constant_fixed_point(const real_info_params<T> &params, const T *input,
+	size_t n_elem, T *output) {
+	if (!params.fixed_point || !params.fixed_range.constant) return false;
+	if (n_elem == 0) return true;
+	if (input == nullptr || output == nullptr) {
+		throw fixed_point_error("Fixed-point conversion requires valid input and output arrays.");
+	}
+	for (size_t i = 0; i < n_elem; ++i) {
+		if (!std::isfinite(input[i]) || input[i] != params.fixed_range.minimum) {
+			throw fixed_point_error("Fixed-point value does not match the initialized constant range.");
+		}
+	}
+	// Copy the original values to preserve the signs of zero as well.
+	if (input != output) std::copy_n(input, n_elem, output);
+	return true;
+}
+
+/*
+  Fixed-point arithmetic class modelled on Alex Pinard's implementation.
+
+  The endpoints map to 0 and max_code. max_code = 2^63 - 1024 is exactly
+  representable as both double and int64_t, unlike double(INT64_MAX).
+  Interior values are normalized in double precision and truncated.
+  Constant ranges use code 0 and decode directly to their stored value.
+*/
+template <typename T>
+class FP {
+	static_assert(std::is_same_v<T, float> || std::is_same_v<T, double>);
+	static_assert(std::numeric_limits<double>::digits >= 53,
+		"The fixed-point endpoint requires at least 53 bits of double precision.");
+	fixed_point_range<T> range_;
+
+	int64_t encode(double x) const {
+		if (!std::isfinite(x) || x < static_cast<double>(range_.minimum) ||
+			x > static_cast<double>(range_.maximum)) {
+			throw fixed_point_error("Fixed-point value must be finite and inside the initialized range.");
+		}
+		if (range_.constant || x == static_cast<double>(range_.minimum)) return 0;
+		if (x == static_cast<double>(range_.maximum)) return max_code;
+		const double normalized = std::clamp(
+			(x - static_cast<double>(range_.minimum)) / range_.width, 0.0, 1.0);
+		return static_cast<int64_t>(normalized * static_cast<double>(max_code));
+	}
+
+	double normalized_value() const {
+		if (value < 0 || value > max_code) {
+			throw fixed_point_error("Fixed-point code is outside the initialized mapping.");
+		}
+		return static_cast<double>(value) / static_cast<double>(max_code);
+	}
+
+public:
+	static constexpr int64_t max_code = std::numeric_limits<int64_t>::max() - 1023;
+	int64_t value = 0;
+
+	// Construct an encoded zero directly; do not try to encode floating-point 0.
+	explicit FP(const fixed_point_range<T> &range) : range_(range) {}
+
+	FP(const fixed_point_range<T> &range, T x) : range_(range) {
+		value = encode(static_cast<double>(x));
+	}
+
+	T convert_back() const {
+		if (range_.constant) return range_.minimum;
+		const double normalized = normalized_value();
+		if (value == 0) return range_.minimum;
+		if (value == max_code) return range_.maximum;
+		return static_cast<T>(std::lerp(static_cast<double>(range_.minimum),
+			static_cast<double>(range_.maximum), normalized));
+	}
+
+	// Keep differences in double precision until the final output conversion.
+	double convert_back_no_offset() const {
+		if (range_.constant) return 0.0;
+		return normalized_value() * range_.width;
+	}
+
+	FP operator+(const FP &other) const {
+		FP result(range_);
+		result.value = encode(static_cast<double>(convert_back()) + static_cast<double>(other.convert_back()));
+		return result;
+	}
+
+	FP operator-(const FP &other) const {
+		FP result(range_);
+		result.value = encode(static_cast<double>(convert_back()) - static_cast<double>(other.convert_back()));
+		return result;
+	}
+};
+
+template <typename T>
+void get_start_end_bits(const real_info_params<T> &params, int n_bits, int *start, int *end) {
+	if (params.fixed_point) {
+		*start = 0;
+		*end = 63; // Assuming 64-bit fixed-point representation
+	} else if (params.mantissa_only) {
 		if (n_bits == 32) {
 			*end = 23;
 		} else if (n_bits == 64) {
@@ -26,127 +524,145 @@ void get_start_end_bits(int n_bits, int *start, int *end) {
 	*start = 0;
 }
 
-template<typename T>
+namespace real_info_detail {
+
+enum class bit_operation { shave, set, halfshave, round };
+
+template <typename T>
+using native_word = std::conditional_t<std::is_same_v<T, float>, uint32_t, uint64_t>;
+
+template <typename T>
+void validate_bit_count(int n, bool fixed_point = false) {
+    static_assert(std::is_same_v<T, float> || std::is_same_v<T, double>);
+    const int maximum = fixed_point ? 63 : std::numeric_limits<T>::digits - 1;
+    if (n < 0 || n > maximum) {
+        throw fixed_point_error("Bit count must be between 0 and " + std::to_string(maximum));
+    }
+}
+
+// Shared unsigned implementation; callers restrict native operations to the
+// mantissa and fixed-point operations to the 63 nonnegative code bits.
+template <std::unsigned_integral UInt>
+UInt transform_word(UInt value, int n, bit_operation operation) {
+    if (n < 0 || n >= std::numeric_limits<UInt>::digits) {
+        throw fixed_point_error("Bit count is outside the unsigned word width");
+    }
+    if (n == 0) return value;
+    const UInt step = UInt{1} << n;
+    const UInt mask = step - UInt{1};
+    const UInt cleared = value & ~mask;
+    switch (operation) {
+        case bit_operation::shave:
+            return cleared;
+        case bit_operation::set:
+            return value | mask;
+        case bit_operation::halfshave:
+            return cleared | (UInt{1} << (n - 1));
+        case bit_operation::round: {
+            const UInt discarded = value & mask;
+            const UInt halfway = step >> 1;
+            // At a tie, the least-significant RETAINED bit decides parity.
+            const bool increment = discarded > halfway ||
+                (discarded == halfway && ((value >> n) & UInt{1}) != 0);
+            if (!increment) return cleared;
+            if (cleared > std::numeric_limits<UInt>::max() - step) {
+                throw fixed_point_error("Rounded unsigned word would overflow");
+            }
+            return cleared + step;
+        }
+    }
+    throw fixed_point_error("Unknown bit operation");
+}
+
+template <typename T>
+native_word<T> transform_native(native_word<T> value, int n, bit_operation operation) {
+    validate_bit_count<T>(n);
+    using UInt = native_word<T>;
+    constexpr int fraction_bits = std::numeric_limits<T>::digits - 1;
+    constexpr UInt fraction_mask = (UInt{1} << fraction_bits) - UInt{1};
+    constexpr UInt exponent_mask = (std::numeric_limits<UInt>::max() >> 1) & ~fraction_mask;
+    // Preserve infinities and NaN payloads without floating-point arithmetic,
+    // including signaling NaNs. Rounding finite values may overflow to infinity.
+    if ((value & exponent_mask) == exponent_mask) return value;
+    return transform_word(value, n, operation);
+}
+
+template <typename T>
+bool copy_unmodified(const real_info_params<T> &params, const T *input,
+                     size_t n_elem, int n, T *output) {
+    validate_bit_count<T>(n, params.fixed_point);
+    if (n_elem == 0) return true;
+    if (input == nullptr || output == nullptr) {
+        throw fixed_point_error("Bit operations require valid input and output arrays");
+    }
+    if (copy_constant_fixed_point(params, input, n_elem, output)) return true;
+    if (n != 0) return false;
+    if (params.fixed_point) {
+        for (size_t i = 0; i < n_elem; ++i) {
+            // Validate the input range, but avoid an encode/decode round trip.
+            const FP<T> checked(params.fixed_range, input[i]);
+            (void)checked;
+        }
+    }
+    if (input != output) std::memmove(output, input, n_elem * sizeof(T));
+    return true;
+}
+
+} // namespace real_info_detail
+
 /**
- * @brief Utility wrapper for bit-level operations on floating-point values.
- *
- * The class stores the raw IEEE-754 bit pattern of a float or double and
- * exposes helpers to shave, set, halfshave, and round least-significant bits.
- *
- * @tparam T Floating-point type (`float` or `double`).
+ * @brief Unsigned native/fixed-point storage with shared low-bit operations.
+ * Native counts are limited to the mantissa; fixed-point counts to 63 bits.
  */
-class bits{
-	public:
-		uint32_t bit_set_32;
-		uint64_t bit_set_64;
+template <typename T>
+class bits {
+    static_assert(std::is_same_v<T, float> || std::is_same_v<T, double>);
+    const real_info_params<T> &params_;
 
-		/**
-		 * @brief Construct from a floating-point value by copying its bit pattern.
-		 * @param x Input value.
-		 */
-		bits(T x) {
-			if (std::is_same_v<T, float>) {
-				std::memcpy(&bit_set_32, &x, sizeof(float));
-			} else if (std::is_same_v<T, double>) {
-				std::memcpy(&bit_set_64, &x, sizeof(double));
-			}
-		}
+    void apply(int n, real_info_detail::bit_operation operation) {
+        real_info_detail::validate_bit_count<T>(n, params_.fixed_point);
+        if (n == 0 || (params_.fixed_point && params_.fixed_range.constant)) return;
+        if (params_.fixed_point) {
+            const auto maximum = static_cast<uint64_t>(FP<T>::max_code);
+            if (bit_set_64 > maximum) throw fixed_point_error("Fixed-point code is outside the initialized mapping");
+            // Setting, half-shaving, or rounding near the upper endpoint can
+            // exceed Q. Saturate in unsigned arithmetic before decoding.
+            bit_set_64 = std::min(real_info_detail::transform_word(bit_set_64, n, operation), maximum);
+        } else if constexpr (std::is_same_v<T, float>) {
+            bit_set_32 = real_info_detail::transform_native<T>(bit_set_32, n, operation);
+        } else {
+            bit_set_64 = real_info_detail::transform_native<T>(bit_set_64, n, operation);
+        }
+    }
 
-		/**
-		 * @brief Reconstruct the floating-point value from the stored bits.
-		 * @return Value of type `T` represented by the current bit pattern.
-		 */
-		T convert_back() {
-			T result;
-			if (std::is_same_v<T, float>) {
-				std::memcpy(&result, &bit_set_32, sizeof(float));
-			} else if (std::is_same_v<T, double>) {
-				std::memcpy(&result, &bit_set_64, sizeof(double));
-			}
-			return result;
-		}
+public:
+    uint32_t bit_set_32 = 0;
+    uint64_t bit_set_64 = 0;
 
-		/**
-		 * @brief Shave the lowest `n` bits.
-		 * @param n Number of least-significant bits to shave.
-		 */
-		void shave(int n) {
-			if (std::is_same_v<T, float>) {
-				uint32_t mask = 0xFFFFFFFF << n;
-				bit_set_32 &= mask;
-			} else if (std::is_same_v<T, double>) {
-				uint64_t mask = 0xFFFFFFFFFFFFFFFF << n;
-				bit_set_64 &= mask;
-			}
-		}
+    bits(const real_info_params<T> &params, T value) : params_(params) {
+        if (params_.fixed_point) {
+            bit_set_64 = static_cast<uint64_t>(FP<T>(params_.fixed_range, value).value);
+        } else if constexpr (std::is_same_v<T, float>) {
+            bit_set_32 = std::bit_cast<uint32_t>(value);
+        } else {
+            bit_set_64 = std::bit_cast<uint64_t>(value);
+        }
+    }
 
-		/**
-		 * @brief Set the lowest `n` bits to 1.
-		 * @param n Number of least-significant bits to set.
-		 */
-		void set(int n) {
-			if (std::is_same_v<T, float>) {
-				uint32_t mask = 0xFFFFFFFF << n;
-				bit_set_32 |= ~mask;
-			} else if (std::is_same_v<T, double>) {
-				uint64_t mask = 0xFFFFFFFFFFFFFFFF << n;
-				bit_set_64 |= ~mask;
-			}
-		}
+    T convert_back() {
+        if (params_.fixed_point) {
+            FP<T> value(params_.fixed_range);
+            value.value = std::bit_cast<int64_t>(bit_set_64);
+            return value.convert_back();
+        }
+        if constexpr (std::is_same_v<T, float>) return std::bit_cast<T>(bit_set_32);
+        else return std::bit_cast<T>(bit_set_64);
+    }
 
-		/**
-		 * @brief Shave the lowest `n` bits and set the highest cleared bit.
-		 * @param n Number of least-significant bits to modify.
-		 */
-		void halfshave(int n) {
-			int nbits = sizeof(T) * CHAR_BIT;
-			if (std::is_same_v<T, float>) {
-				uint32_t keep_mask = 0xFFFFFFFF << n;
-				bit_set_32 &= keep_mask;
-				uint32_t round_up_mask = 0x80000000 >> (nbits - n - 1);
-				bit_set_32 |= round_up_mask;
-			} else if (std::is_same_v<T, double>) {
-				uint64_t keep_mask = 0xFFFFFFFFFFFFFFFF << n;
-				bit_set_64 &= keep_mask;
-				uint64_t round_up_mask = 0x8000000000000000 >> (nbits - n - 1);
-				bit_set_64 |= round_up_mask;
-			}
-		}
-
-		/**
-		 * @brief Bitwise round the `n` least-significant bits
-		 * @param n Number of least-significant bits to round away.
-		 */
-		void round(int n) {
-			int nbits = sizeof(T) * CHAR_BIT;
-			int mantissa_bits = nbits - get_n_exponent_bits(nbits) - 1;
-			int keepbits = mantissa_bits - n;
-			int shift = mantissa_bits - keepbits - 1;
-			shift -= (keepbits == mantissa_bits) ? 1 : 0;
-
-			if (std::is_same_v<T, float>) {
-				uint32_t upper_mask;
-				if (nbits - n + 1 >= 32) {
-					upper_mask = 0x00000000; // bitshift leads to undefined behaviour if greater than number of bits, and what we really want are all zeros
-				} else {
-				 	upper_mask = 0xffffffff >> (nbits - n + 1);
-				}
-				uint32_t lower_mask = 0xFFFFFFFF << n;
-				uint32_t temp_bit_set_32 = bit_set_32 + upper_mask + ((bit_set_32 >> shift) & 1);
-				bit_set_32 = temp_bit_set_32 & lower_mask;
-			} else if (std::is_same_v<T, double>) {
-				uint64_t upper_mask;
-				if (nbits - n + 1 >= 64) {
-					upper_mask = 0x0000000000000000; // bitshift leads to undefined behaviour if greater than number of bits, and what we really want are all zeros
-				} else {
-				 	upper_mask = 0xFFFFFFFFFFFFFFFF >> (nbits - n + 1);
-				}
-				uint64_t lower_mask = 0xFFFFFFFFFFFFFFFF << n;
-				uint64_t temp_bit_set_64 = bit_set_64 + upper_mask + ((bit_set_64 >> shift) & 1);
-				bit_set_64 = temp_bit_set_64 & lower_mask;
-			}
-		}
-
+    void shave(int n) { apply(n, real_info_detail::bit_operation::shave); }
+    void set(int n) { apply(n, real_info_detail::bit_operation::set); }
+    void halfshave(int n) { apply(n, real_info_detail::bit_operation::halfshave); }
+    void round(int n) { apply(n, real_info_detail::bit_operation::round); }
 };
 
 /** 
@@ -157,25 +673,42 @@ class bits{
  * @param shaved Output array of shaved values.
  */
 template <typename T>
-void shave_bits(T *A, size_t n_elem, int n, T *shaved) {
+void shave_bits(const real_info_params<T> &RI_params, T *A, size_t n_elem, int n, T *shaved) {
+	if (real_info_detail::copy_unmodified(RI_params, A, n_elem, n, shaved)) return;
 	for (size_t i = 0; i < n_elem; i++) {
-		bits<T> b(A[i]);
+		bits<T> b(RI_params, A[i]);
+		uint64_t a;
+		if (RI_params.fixed_point) {
+			a = b.bit_set_64;
+		}
 		b.shave(n);
-		shaved[i] = b.convert_back();
+		if (RI_params.fixed_point) {
+			FP<T> diff_fp(RI_params.fixed_range);
+			diff_fp.value = static_cast<int64_t>(a - b.bit_set_64);
+			const double diff = diff_fp.convert_back_no_offset();
+			const double result = std::clamp(static_cast<double>(A[i]) - diff,
+				static_cast<double>(RI_params.fixed_range.minimum),
+				static_cast<double>(RI_params.fixed_range.maximum));
+			shaved[i] = static_cast<T>(result);
+		} else {
+			shaved[i] = b.convert_back();
+		}
 	}
 }
 
 /** 
  * @brief Half-shave the lowest `n` bits from each element in an array.
+ * @param RI_params Real information parameters.
  * @param A Input array of type `T`.
  * @param n_elem Number of elements in the array.
  * @param n Number of least-significant bits to half-shave.
  * @param halfshaved Output array of half-shaved values.
  */
 template <typename T>
-void halfshave_bits(T *A, size_t n_elem, int n, T *halfshaved) {
+void halfshave_bits(const real_info_params<T> &RI_params, T *A, size_t n_elem, int n, T *halfshaved) {
+	if (real_info_detail::copy_unmodified(RI_params, A, n_elem, n, halfshaved)) return;
 	for (size_t i = 0; i < n_elem; i++) {
-		bits<T> b(A[i]);
+		bits<T> b(RI_params, A[i]);
 		b.halfshave(n);
 		halfshaved[i] = b.convert_back();
 	}
@@ -183,15 +716,17 @@ void halfshave_bits(T *A, size_t n_elem, int n, T *halfshaved) {
 
 /** 
  * @brief Bitwise round the `n` least-significant bits from each element in an array.
+ * @param RI_params Real information parameters.
  * @param A Input array of type `T`.
  * @param n_elem Number of elements in the array.
  * @param n Number of least-significant bits to round.
  * @param bit_rounding_result Output array of rounded values.
  */
 template <typename T>
-void bit_rounding_bits(T *A, size_t n_elem, int n, T *bit_rounding_result) {
+void bit_rounding_bits(const real_info_params<T> &RI_params, T *A, size_t n_elem, int n, T *bit_rounding_result) {
+	if (real_info_detail::copy_unmodified(RI_params, A, n_elem, n, bit_rounding_result)) return;
 	for (size_t i = 0; i < n_elem; i++) {
-		bits<T> b(A[i]);
+		bits<T> b(RI_params, A[i]);
 		b.round(n);
 		bit_rounding_result[i] = b.convert_back();
 	}
@@ -199,80 +734,77 @@ void bit_rounding_bits(T *A, size_t n_elem, int n, T *bit_rounding_result) {
 
 /** 
  * @brief Set the lowest `n` bits for each element in an array.
+ * @param RI_params Real information parameters.
  * @param A Input array of type `T`.
  * @param n_elem Number of elements in the array.
  * @param n Number of least-significant bits to set.
  * @param set Output array of set values.
  */
 template <typename T>
-void set_bits(T *A, size_t n_elem, int n, T *set) {
+void set_bits(const real_info_params<T> &RI_params, T *A, size_t n_elem, int n, T *set) {
+	if (real_info_detail::copy_unmodified(RI_params, A, n_elem, n, set)) return;
 	for (size_t i = 0; i < n_elem; i++) {
-		bits<T> b(A[i]);
+		bits<T> b(RI_params, A[i]);
 		b.set(n);
 		set[i] = b.convert_back();
 	}
 }
 
-static int bit_pair_count_calls = 0;
+/**
+ * @brief Alternate setting and shaving the lowest `n` bits of array elements.
+ * @param RI_params Real information parameters.
+ * @param A Input array of type `T`.
+ * @param n_elem Number of elements in the array.
+ * @param n Number of least-significant bits to modify.
+ * @param groomed Output array, with even-indexed elements set and odd ones shaved.
+ */
+template <typename T>
+void groom_bits(const real_info_params<T> &RI_params, T *A, size_t n_elem, int n, T *groomed) {
+	if (real_info_detail::copy_unmodified(RI_params, A, n_elem, n, groomed)) return;
+	for (size_t i = 0; i < n_elem; i++) {
+		if (i % 2 == 0) {
+			set_bits<T>(RI_params, A + i, 1, n, groomed + i);
+		} else {
+			shave_bits<T>(RI_params, A + i, 1, n, groomed + i);
+		}
+	}
+}
 
-template<std::floating_point T>
-struct HELP {
-	using type = std::bitset<sizeof(T) * CHAR_BIT>;
-};
+static int bit_pair_count_calls = 0;
 
 static int n_exponent_bits_float = 8;
 static int n_exponent_bits_double = 11;
-static int n_joint_counts = 4;
+static constexpr int n_joint_counts = 4;
 static int n_counts = 2;
 
-/** 
- *  @brief Gets the number of exponent bits for a given bit size following IEEE 754 standard.
- *  @param nbits The bit size.
- *  @return The number of exponent bits.
- */
-inline int get_n_exponent_bits(int nbits) {
-	if (nbits == 32) {
-		return 23;
-	} else if (nbits == 64) {
-		return 52;
-	} else {
-		std::cerr << "Unsupported bit size: " << nbits << "\n";
-		return 0;
-	}
-}
-
-// XXX: temporarily dump these helper functions here
-/**
- * @brief Counts the number of bits set to 1 in a specific bit position across an array.
- * @param A Input array of type `T`.
- * @param n_elem Number of elements in the array.
- * @param i Bit position to count (0 for least significant bit).
- */
-template <typename T>
-size_t bit_count(T *A, size_t n_elem, int i) {
-	size_t count = 0;
-
-	for (size_t j = 0; j < n_elem; j++) {
-		auto *b0 = reinterpret_cast<typename HELP<T>::type*>(&A[j]);
-		count += (*b0)[i];
-	}
-
-	return count;
-}
+// Per-bit work is bounded by the larger of the native and fixed-point widths,
+// independent of the input length (including 63-bit fixed-point float inputs).
+template <typename T, typename Value, size_t CountsPerBit = 1>
+using bit_metric_buffer = std::array<Value,
+    CountsPerBit * std::max(sizeof(T), sizeof(int64_t)) * CHAR_BIT>;
 
 /**
  * @brief Counts the number of bits set to 1 in a specific bit position across an array using the `bits` class.
+ * @param RI_params Real information parameters.
  * @param A Input array of type `T`.
  * @param n_elem Number of elements in the array.
  * @param i Bit position to count (0 for least significant bit).
  * @return The count of bits set to 1 in the specified bit position across the array.
  */
 template <typename T>
-size_t bit_count_bits(T *A, size_t n_elem, int i) {
+size_t bit_count_bits(const real_info_params<T> &RI_params, T *A, size_t n_elem, int i, size_t *non_zero) {
 	size_t count = 0;
+	*non_zero = 0;
 	for (size_t j = 0; j < n_elem; j++) {
-		bits<T> b(A[j]);
-		if (std::is_same_v<T, float>) {
+		if (RI_params.mask_zero && std::abs(A[j]) < EPS) {
+			continue;
+		}
+		bits<T> b(RI_params, A[j]);
+		if (RI_params.fixed_point) {
+			uint64_t mask = 0x0000000000000001;
+			mask <<= i;
+			count += (b.bit_set_64 & mask) ? 1 : 0;
+		} else if (std::is_same_v<T, float>) {
 			uint32_t mask = 0x00000001;
 			mask <<= i;
 			count += (b.bit_set_32 & mask) ? 1 : 0;
@@ -281,7 +813,9 @@ size_t bit_count_bits(T *A, size_t n_elem, int i) {
 			mask <<= i;
 			count += (b.bit_set_64 & mask) ? 1 : 0;
 		}
+		(*non_zero)++;
 	}
+	assert(*non_zero > 0);
 
 	return count;
 }
@@ -293,21 +827,12 @@ size_t bit_count_bits(T *A, size_t n_elem, int i) {
  * @param c Output array to store the count of bits set to 1 for each bit position.
  */
 template <typename T>
-void bit_count(T *A, size_t n_elem, size_t *c) {
+void bit_count_bits(const real_info_params<T> &RI_params, T *A, size_t n_elem, size_t *c, size_t *non_zero) {
 	int n_bits = sizeof(A[0]) * CHAR_BIT;
 	int start_bit, end_bit;
-	get_start_end_bits(n_bits, &start_bit, &end_bit);
+	get_start_end_bits<T>(RI_params, n_bits, &start_bit, &end_bit);
 	for (int i = start_bit; i < end_bit; i++) {
-		c[i - start_bit] = bit_count(A, n_elem, i);
-	}
-}
-template <typename T>
-void bit_count_bits(T *A, size_t n_elem, size_t *c) {
-	int n_bits = sizeof(A[0]) * CHAR_BIT;
-	int start_bit, end_bit;
-	get_start_end_bits(n_bits, &start_bit, &end_bit);
-	for (int i = start_bit; i < end_bit; i++) {
-		c[i - start_bit] = bit_count_bits(A, n_elem, i);
+		c[i - start_bit] = bit_count_bits(RI_params, A, n_elem, i, non_zero);
 	}
 }
 
@@ -341,9 +866,8 @@ double bitpattern_entropy(T *A, size_t n_elem) {
   double H = 0;
   size_t count = 1;
 
-  T *A_sorted = new T[n_elem];
-  std::memcpy(A_sorted, A, n_elem * sizeof(T));
-  std::sort(A_sorted, A_sorted + n_elem);
+  std::vector<T> A_sorted(A, A + n_elem);
+  std::sort(A_sorted.begin(), A_sorted.end());
   for (size_t i = 0; i < n_elem-1; i++) {
     if (A_sorted[i+1] == A_sorted[i]) {
       count += 1;
@@ -356,22 +880,27 @@ double bitpattern_entropy(T *A, size_t n_elem) {
 
   p = static_cast<double>(count)/static_cast<double>(n_elem);
   H += -p * std::log2(p);
-  delete[] A_sorted;
   return H;
 }
 
 /**
  * @brief Helper function to compute pair counts at a particular position in two numbers represented as bits.
+ * @param RI_params Real information parameters.
  * @param a First number represented as bits.
  * @param b Second number represented as bits.
  * @param j Bit position to compare.
  * @param p Output array to store the counts of each bit pair.
  */
 template <typename T>
-void bit_pair_count_bits(bits<T> a, bits<T> b, int j, int *p) {
+void bit_pair_count_bits(const real_info_params<T> &RI_params, const bits<T> &a, const bits<T> &b, int j, int *p) {
 	int bit_a, bit_b;
 
-	if (std::is_same_v<T, float>) {
+	if (RI_params.fixed_point) {
+		uint64_t mask = 0x0000000000000001;
+		mask <<= j;
+		bit_a = (a.bit_set_64 & mask) ? 1 : 0;
+		bit_b = (b.bit_set_64 & mask) ? 1 : 0;
+	} else if (std::is_same_v<T, float>) {
 		uint32_t mask = 0x00000001;
 		mask <<= j;
 		bit_a = (a.bit_set_32 & mask) ? 1 : 0;
@@ -397,85 +926,40 @@ void bit_pair_count_bits(bits<T> a, bits<T> b, int j, int *p) {
 
 /**
  * @brief Counts the occurrences of bit pairs (00, 01, 10, 11) between two arrays.
+ * @param RI_params Real information parameters.
  * @param A Pointer to the first array.	
  * @param B Pointer to the second array.
  * @param n_elem The number of elements in the arrays A and B.
  * @param pair_counts Pointer to an array to store the counts of each bit pair.
  */
 template <typename T>
-void bit_pair_count_bits(T *A, T *B, size_t n_elem, size_t *pair_counts) {
+void bit_pair_count_bits(const real_info_params<T> &RI_params, T *A, T *B, size_t n_elem, size_t *pair_counts, size_t *non_zero) {
 	bit_pair_count_calls += 1;
 	const int n_bits = sizeof(T) * CHAR_BIT;
 	int start_bit, end_bit;
-	get_start_end_bits(n_bits, &start_bit, &end_bit);
+	get_start_end_bits<T>(RI_params, n_bits, &start_bit, &end_bit);
 	int total_bits = end_bit - start_bit;
+	*non_zero = 0;
 	#pragma omp parallel for reduction(+:pair_counts[:total_bits * n_joint_counts])
 	for (size_t i = 0; i < n_elem; i++) {
-		bits<T> a(A[i]);
-		bits<T> b(B[i]);
-		int pair_count[4];
-		for (int j = start_bit; j < end_bit; i++) {
-			bit_pair_count_bits(a, b, j, pair_count);
-			pair_counts[(j - start_bit) * n_joint_counts] += pair_count[0];
-			pair_counts[(j - start_bit) * n_joint_counts + 1] += pair_count[1];
-			pair_counts[(j - start_bit) * n_joint_counts + 2] += pair_count[2];
-			pair_counts[(j - start_bit) * n_joint_counts + 3] += pair_count[3];
+		if (RI_params.mask_zero && std::abs(A[i]) < EPS && std::abs(B[i]) < EPS) {
+			continue;
 		}
-	}
-}
-
-/**
- * @brief Helper function to compute pair counts at a particular position in two numbers represented as bitsets.
- * @param a First number represented as a bitset.
- * @param b Second number represented as a bitset.
- * @param j Bit position to compare.
- * @param p Output array to store the counts of each bit pair.
- */
-template <int n_bits>
-void bit_pair_count(std::bitset<n_bits> a, std::bitset<n_bits> b, int j, int *p) {
-	for (int i = 0; i < 4; i++) p[i] = 0;
-	if (a[j] == 0 && b[j] == 0) {
-		p[0] = 1;
-	} else if (a[j] == 0 && b[j] == 1) {
-		p[1] = 1;
-	} else if (a[j] == 1 && b[j] == 0) {
-		p[2] = 1;
-	} else if (a[j] == 1 && b[j] == 1) {
-		p[3] = 1;
-	}
-}
-
-/**
- * @brief Counts the occurrences of bit pairs (00, 01, 10, 11) between two arrays.
- *
- * @tparam T The type of the elements in the input arrays.
- * @param A Pointer to the first array.
- * @param B Pointer to the second array.
- * @param n_elem The number of elements in the arrays A and B.
- * @param pair_counts Pointer to an array to store the counts of each bit pair.
- */
-template <typename T>
-void bit_pair_count(T *A, T *B, size_t n_elem, size_t *pair_counts) {
-	bit_pair_count_calls += 1;
-	const int n_bits = sizeof(T) * CHAR_BIT;
-	int start_bit, end_bit;
-	get_start_end_bits(n_bits, &start_bit, &end_bit);
-	int total_bits = end_bit - start_bit;
-	#pragma omp parallel for reduction(+:pair_counts[:total_bits * n_joint_counts])
-	for (size_t i = 0; i < n_elem; i++) {
-		auto a = reinterpret_cast<typename HELP<T>::type *>(&A[i]);
-		auto b = reinterpret_cast<typename HELP<T>::type *>(&B[i]);
+		bits<T> a(RI_params, A[i]);
+		bits<T> b(RI_params, B[i]);
 		int pair_count[4];
 		for (int j = start_bit; j < end_bit; j++) {
-			bit_pair_count<sizeof(T) * CHAR_BIT>(*a, *b, j, pair_count);
+			bit_pair_count_bits(RI_params, a, b, j, pair_count);
 			pair_counts[(j - start_bit) * n_joint_counts] += pair_count[0];
 			pair_counts[(j - start_bit) * n_joint_counts + 1] += pair_count[1];
 			pair_counts[(j - start_bit) * n_joint_counts + 2] += pair_count[2];
 			pair_counts[(j - start_bit) * n_joint_counts + 3] += pair_count[3];
 		}
+		//XXX: change this to a reduction of some sort
+		#pragma omp critical 
+		(*non_zero)++;
 	}
 }
-// End helper functions
 
 /**
  * @brief Computes the entropy of each bit position in an array.
@@ -486,197 +970,20 @@ void bit_pair_count(T *A, T *B, size_t n_elem, size_t *pair_counts) {
  * @param H Pointer to an array to store the entropy of each bit position.
  */
 template <typename T>
-void bit_count_entropy(T *A, size_t n_elem, double *H) {
+void bit_count_entropy(const real_info_params<T> &RI_params, T *A, size_t n_elem, double *H) {
 	const int n_bits = sizeof(A[0]) * CHAR_BIT;
 	int start_bit, end_bit;
-	get_start_end_bits(n_bits, &start_bit, &end_bit);
-	int total_bits = end_bit - start_bit;
-	size_t c[total_bits];
-	bit_count(A, n_elem, c);
-	//bit_count_bits(A, n_elem, c); // bits class implementation
+	get_start_end_bits<T>(RI_params, n_bits, &start_bit, &end_bit);
+	bit_metric_buffer<T, size_t> c{};
+	size_t n_non_zero;
+	bit_count_bits(RI_params, A, n_elem, c.data(), &n_non_zero); // bits class implementation
+	assert(n_non_zero > 0);
 
 	for (int i = start_bit; i < end_bit; i++) {
-		double p = static_cast<double>(c[i - start_bit])/static_cast<double>(n_elem);
+		//double p = static_cast<double>(c[i - start_bit])/static_cast<double>(n_elem);
+		double p = static_cast<double>(c[i - start_bit])/static_cast<double>(n_non_zero);
 		double p_array[2] = {p, 1 - p};
 		H[i - start_bit] = entropy(p_array, 2);
-	}
-}
-
-/** @brief shaves specified number of least significant bits from given bitset
- *
- *  @tparam n size of bitset
- *  @param b pointer to bitset to shave
- *  @param n number of bits to shave
- */
-template <size_t nbits>
-void shave_bitset(std::bitset<nbits> *b, int n) {
-	std::bitset<nbits> mask = -1;	// all 1's
-	mask <<= n;
-	*b &= mask;
-}
-
-/**
- * @brief Clears the least significant bits of each element in an array.
- *
- * @tparam T The type of the elements in the input array.
- * @param a Pointer to the input array.
- * @param n_elem The number of elements in the input array.
- * @param n The number of least significant bits to clear.
- * @param shaved Pointer to the output array to store the modified elements.
- */
-template <typename T>
-void shave_template(T *a, size_t n_elem, int n, T *shaved) {
-	for (size_t i = 0; i < n_elem; i++) {
-		typename HELP<T>::type b;
-		std::memcpy(&b, &a[i], sizeof(T));
-		shave_bitset(&b, n);
-		std::memcpy(&shaved[i], &b, sizeof(T));
-	}
-}
-
-/** @brief replaces specified number of least significant bits from given bitset with 10000...
- *
- *  @tparam n size of bitset
- *  @param b pointer to bitset to shave
- *  @param n number of bits to shave
- */
-template <size_t nbits>
-void halfshave_bitset(std::bitset<nbits> *b, int n) {
-	std::bitset<nbits> keep_mask = -1;	// all 1's
-	keep_mask <<= n;
-	*b &= keep_mask;
-	std::bitset<nbits> round_up_mask = 0x80000000;
-	round_up_mask >>= (nbits - n - 1);
-	*b |= round_up_mask;
-}
-
-/**
- * @brief half shaves (i.e. replaces with 100...) the least significant bits of each element in an array.
- *
- * @tparam T The type of the elements in the input array.
- * @param a Pointer to the input array.
- * @param n_elem The number of elements in the input array.
- * @param n The number of least significant bits to clear.
- * @param halfshaved Pointer to the output array to store the modified elements.
- */
-template <typename T>
-void halfshave_template(T *a, size_t n_elem, int n, T *halfshaved) {
-	for (size_t i = 0; i < n_elem; i++) {
-		typename HELP<T>::type b;
-		std::memcpy(&b, &a[i], sizeof(T));
-		halfshave_bitset(&b, n);
-		std::memcpy(&halfshaved[i], &b, sizeof(T));
-	}
-}
-
-/**
- *  @brief Rounds the least significant bits of a bitset to the specified number of bits.
- *         Does this by creating an upper and lower mask to isolate the nth bit as a bitset
- *		   then adds it to the original bitset that had n-1 least significant bits cleared. This is a hacky way to do rounding since we can't do math operations with bitsets, but it works.
- *
- *  @tparam n size of bitset
- *  @param b pointer to bitset to round
- *  @param n number of bits to round to
- */
-template <size_t nbits>
-void round_bitset(std::bitset<nbits> *b, int n){
-	int mantissa_bits = nbits - get_n_exponent_bits(nbits) - 1;
-	std::bitset<nbits> mask = -1;	// all 1's
-	std::bitset<nbits> lower_mask = mask << n;
-	std::bitset<nbits> upper_mask = mask >> (nbits - n + 1);
-	int keepbits = mantissa_bits - n;
-	int shift = mantissa_bits - keepbits - 1;
-	shift -= (keepbits == mantissa_bits) ? 1 : 0;
-
-	if (nbits == 32) {
-		std::uint32_t temp_b, upper_mask_uint;
-		std::memcpy(&temp_b, b, sizeof(std::uint32_t));
-		std::memcpy(&upper_mask_uint, &upper_mask, sizeof(std::uint32_t));
-		temp_b += upper_mask_uint + ((temp_b >> shift) & 1);
-		std::memcpy(b, &temp_b, sizeof(std::uint32_t));
-		*b &= lower_mask;
-	} else if (nbits == 64) {
-		std::uint64_t temp_b, upper_mask_uint;
-		std::memcpy(&temp_b, b, sizeof(std::uint64_t));
-		std::memcpy(&upper_mask_uint, &upper_mask, sizeof(std::uint64_t));
-		temp_b += upper_mask_uint + ((temp_b >> shift) & 1);
-		std::memcpy(b, &temp_b, sizeof(std::uint64_t));
-		*b &= lower_mask;
-	} else {
-		std::cerr << "Unsupported bit size: " << nbits << "\n";
-	}
-}
-
-/**
- * @brief Performs bit rounding to the specified number of bits.
- *
- * @tparam T The type of the elements in the input array.
- * @param a Pointer to the input array.
- * @param n_elem The number of elements in the input array.
- * @param n The number of least significant bits to clear.
- * @param bit_rounding_result Pointer to the output array to store the modified elements.
- */
-template <typename T>
-void bit_rounding_template(T *a, size_t n_elem, int n, T *bit_rounding_result) {
-	for (size_t i = 0; i < n_elem; i++) {
-		typename HELP<T>::type b;
-		std::memcpy(&b, &a[i], sizeof(T));
-		round_bitset(&b, n);
-		std::memcpy(&bit_rounding_result[i], &b, sizeof(T));
-	}
-}
-
-/** @brief sets specified number of least significant bits from given bitset to 1
- *
- *  @tparam n size of bitset
- *  @param b pointer to bitset to set
- *  @param n number of bits to set
- */
-template <size_t nbits>
-void set_bitset(std::bitset<nbits> *b, int n) {
-	std::bitset<nbits> mask = -1;	// all 1's
-	mask <<= n;
-	*b |= ~mask;
-}
-
-/**
- * @brief Clears the least significant bits of each element in an array.
- *
- * @tparam T The type of the elements in the input array.
- * @param a Pointer to the input array.
- * @param n_elem The number of elements in the input array.
- * @param n The number of least significant bits to clear.
- * @param set Pointer to the output array to store the modified elements.
- */
-template <typename T>
-void set_template(T *a, size_t n_elem, int n, T *set) {
-	for (size_t i = 0; i < n_elem; i++) {
-		typename HELP<T>::type b;
-		std::memcpy(&b, &a[i], sizeof(T));
-		set_bitset(&b, n);
-		std::memcpy(&set[i], &b, sizeof(T));
-	}
-}
-
-/**
- * @brief Clears the least significant bits of each element in an array.
- *
- * @tparam T The type of the elements in the input array.
- * @param a Pointer to the input array.
- * @param n_elem The number of elements in the input array.
- * @param n The number of least significant bits to clear.
- * @param groomed Pointer to the output array to store the modified elements.
- */
-template <typename T>
-void groom_template(T *a, size_t n_elem, int n, T *groomed) {
-	for (size_t i = 0; i < n_elem; i++) {
-		typename HELP<T>::type b;
-		std::memcpy(&b, &a[i], sizeof(T));
-		if (i % 2 == 0)
-		  set_bitset(&b, n);
-		else
-		  shave_bitset(&b, n);
-		std::memcpy(&groomed[i], &b, sizeof(T));
 	}
 }
 
@@ -688,27 +995,31 @@ void groom_template(T *a, size_t n_elem, int n, T *groomed) {
  * @param B Pointer to the second input array.
  * @param n_elem The number of elements in the input arrays.
  * @param info Pointer to an array to store the mutual information for each bit position.
+ * @param RI_params Real information parameters.
  */
 template <typename T>
-void mutual_information(T *A, T *B, size_t n_elem, double *info) {
+void mutual_information(const real_info_params<T> &RI_params, T *A, T *B, size_t n_elem, double *info) {
 	const int n_bits = sizeof(A[0]) * CHAR_BIT;
 	int start_bit, end_bit;
-	get_start_end_bits(n_bits, &start_bit, &end_bit);
+	get_start_end_bits<T>(RI_params, n_bits, &start_bit, &end_bit);
 	int total_bits = end_bit - start_bit;
 
-	size_t pair_counts[n_joint_counts * total_bits];
-	for (size_t i = 0; i < n_joint_counts * total_bits; i++) pair_counts[i] = 0;
-	//bit_pair_count_bits(A, B, n_elem, pair_counts); // bits class implementation
-	bit_pair_count(A, B, n_elem, pair_counts);
+	bit_metric_buffer<T, size_t, n_joint_counts> pair_counts{};
+	size_t n_non_zero;
+	bit_pair_count_bits(RI_params, A, B, n_elem, pair_counts.data(), &n_non_zero); // bits class implementation
+	assert(n_non_zero > 0);
 
 	for (int i = 0; i < total_bits; i++) {
 		info[i] = 0;
 		for (int r = 0; r < 2; r++) {
-			double p_r = static_cast<double>(pair_counts[i * n_joint_counts + r * n_counts] + pair_counts[i * n_joint_counts + r * n_counts + 1]) / static_cast<double>(n_elem);
+			//double p_r = static_cast<double>(pair_counts[i * n_joint_counts + r * n_counts] + pair_counts[i * n_joint_counts + r * n_counts + 1]) / static_cast<double>(n_elem);
+			double p_r = static_cast<double>(pair_counts[i * n_joint_counts + r * n_counts] + pair_counts[i * n_joint_counts + r * n_counts + 1]) / static_cast<double>(n_non_zero);
 			for (int s = 0; s < 2; s++) {
-				double p_s = static_cast<double>(pair_counts[i * n_joint_counts + s] + pair_counts[i * n_joint_counts + n_counts + s]) / static_cast<double>(n_elem);
+				//double p_s = static_cast<double>(pair_counts[i * n_joint_counts + s] + pair_counts[i * n_joint_counts + n_counts + s]) / static_cast<double>(n_elem);
+				double p_s = static_cast<double>(pair_counts[i * n_joint_counts + s] + pair_counts[i * n_joint_counts + n_counts + s]) / static_cast<double>(n_non_zero);
 				if (pair_counts[i * n_joint_counts + r * n_counts + s] > 0) {
-					double p_rs = static_cast<double>(pair_counts[i * n_joint_counts + r * n_counts + s]) / static_cast<double>(n_elem);
+					//double p_rs = static_cast<double>(pair_counts[i * n_joint_counts + r * n_counts + s]) / static_cast<double>(n_elem);
+					double p_rs = static_cast<double>(pair_counts[i * n_joint_counts + r * n_counts + s]) / static_cast<double>(n_non_zero);
 					info[i] += p_rs * std::log2(p_rs/(p_r * p_s));
 				}
 			}
@@ -723,38 +1034,40 @@ void mutual_information(T *A, T *B, size_t n_elem, double *info) {
  * @brief Compute real information stored in given array by evaluating mutual information of array with a shifted version of itself
  * 
  * @tparam T Type of elements in array
+ * @param RI_params Real information parameters
  * @param A Pointer to array
  * @param n_elem number of elements in A
  * @param info Pointer to array storing real information
  */
 template <typename T>
-void bitwise_real_information(T *A, size_t n_elem, double *info) {
+void bitwise_real_information(const real_info_params<T> &RI_params, T *A, size_t n_elem, double *info) {
 	T *B = A + 1;
-	mutual_information(A, B, n_elem - 1, info);
+	mutual_information(RI_params, A, B, n_elem - 1, info);
 }
 
 /**
  * @brief Computes amount of redundant information between two arrays
  *
  * @tparam The types of arrays A and B
+ * @param RI_params Real information parameters
  * @param A Pointer to first array 
  * @param B Pointer to first array 
  * @param n_elem Number of elements in each array 
  * @param R Pointer to array to store redundancy for each bit position 
  */
 template <typename T>
-void redundancy(T *A, T *B, size_t n_elem, double *R) {
+void redundancy(const real_info_params<T> &RI_params, T *A, T *B, size_t n_elem, double *R) {
 	const int n_bits = sizeof(A[0]) * CHAR_BIT;
 	int start_bit, end_bit;
-	get_start_end_bits(n_bits, &start_bit, &end_bit);
+	get_start_end_bits<T>(RI_params, n_bits, &start_bit, &end_bit);
 	int total_bits = end_bit - start_bit;
-	double *M = new double[total_bits];
-	double *HA = new double[total_bits];
-	double *HB = new double[total_bits];
+	bit_metric_buffer<T, double> M{};
+	bit_metric_buffer<T, double> HA{};
+	bit_metric_buffer<T, double> HB{};
 
-	mutual_information(A, B, n_elem, M);
-	bit_count_entropy(A, n_elem, HA);
-	bit_count_entropy(B, n_elem, HB);
+	mutual_information(RI_params, A, B, n_elem, M.data());
+	bit_count_entropy(RI_params, A, n_elem, HA.data());
+	bit_count_entropy(RI_params, B, n_elem, HB.data());
 
 	for (int i = 0; i < total_bits; i++) {
 		if (HA[i] + HB[i] > 0) {
@@ -770,22 +1083,33 @@ void redundancy(T *A, T *B, size_t n_elem, double *R) {
  *  @brief Computes real information preserved in array B with respect to A.
  *
  *  @tparam T Type of elements in arrays A and B
+ *  @param RI_params Real information parameters
  *  @param A Pointer to original array
  *  @param B Pointer to shaved array
  *  @param n_elem Number of elements in each array
  *  @return Fraction of real information preserved in B with respect to A
  */
 template <typename T>
-double preserved_information_template(T *A, T *B, size_t n_elem) {
+double preserved_information_template(const real_info_params<T> &RI_params, T *A, T *B, size_t n_elem) {
+	if (B == nullptr) {
+		throw fixed_point_error("Information preservation requires a valid comparison array.");
+	}
+	if (is_constant_array(A, n_elem)) {
+		// A constant reference has zero information: use an explicit lossless
+		// convention instead of a ratio with a zero denominator.
+		return std::memcmp(A, B, n_elem * sizeof(T)) == 0 ? 1.0 : 0.0;
+	}
+    real_info_params<T> float_params = RI_params;
+	float_params.fixed_point = false;
 	const int n_bits = sizeof(A[0]) * CHAR_BIT;
 	int start_bit, end_bit;
-	get_start_end_bits(n_bits, &start_bit, &end_bit);
+	get_start_end_bits<T>(float_params, n_bits, &start_bit, &end_bit);
 	int total_bits = end_bit - start_bit;
-	double *R = new double[total_bits];
-	double *I = new double[total_bits];
+	bit_metric_buffer<T, double> R{};
+	bit_metric_buffer<T, double> I{};
 
-	redundancy(A, B, n_elem, R);
-	bitwise_real_information(A, n_elem, I);
+	redundancy(float_params, A, B, n_elem, R.data());
+	bitwise_real_information(float_params, A, n_elem, I.data());
 
 	double P = 0;
 	double total_information = 0;
@@ -810,13 +1134,19 @@ double preserved_information_template(T *A, T *B, size_t n_elem) {
  * @param tolerance The minimum fraction of preserved information required.
  * @param nbits_old The previous number of bits shaved (0 if starting fresh).
  * @return The number of bits to shave from each element in the array.
+ * @param RI_params Real information parameters
  */
 template <typename T>
-int pick_bits_to_shave_template(T *A, size_t n_elem, double tolerance, int nbits_old) {
+int pick_bits_to_shave_template(const real_info_params<T> &RI_params, T *A, size_t n_elem, double tolerance, int nbits_old) {
+  if (is_constant_array(A, n_elem)) return 0;
   int max_bits = sizeof(T) * CHAR_BIT; 
-  T s[n_elem];
+  std::vector<T> scratch(n_elem);
+  T *s = scratch.data();
   int start_bit;
-  if constexpr (std::is_same_v<T, float>) { 
+  if (RI_params.fixed_point) {
+	max_bits = sizeof(int64_t) * CHAR_BIT;
+	start_bit = max_bits - 1;
+  } else if constexpr (std::is_same_v<T, float>) { 
     start_bit = max_bits - n_exponent_bits_float - 1;
   } else if constexpr (std::is_same_v<T, double>) {
     start_bit = max_bits - n_exponent_bits_double - 1;
@@ -824,9 +1154,8 @@ int pick_bits_to_shave_template(T *A, size_t n_elem, double tolerance, int nbits
   if (nbits_old == 0) {
     /* Start with shaving more bits rather than less */
     for (int i = start_bit; i >= 0; i--) {
-    	shave_template<T>(A, n_elem, i, s);
-    	//shave_bits<T>(A, n_elem, i, s); // bits class implementation
-    	auto info = preserved_information_template<T>(A, s, n_elem);
+		shave_bits<T>(RI_params, A, n_elem, i, s); // bits class implementation
+		auto info = preserved_information_template<T>(RI_params, A, s, n_elem);
     	if (info > tolerance) {
     		return i;
     	}
@@ -835,14 +1164,12 @@ int pick_bits_to_shave_template(T *A, size_t n_elem, double tolerance, int nbits
     int nbits = nbits_old;
     	
     /* Check if we should retain more bits first */
-    shave_template<T>(A, n_elem, nbits, s);
-    //shave_bits<T>(A, n_elem, nbits, s); // bits class implementation
-    auto info = preserved_information_template<T>(A, s, n_elem);
+	shave_bits<T>(RI_params, A, n_elem, nbits, s); // bits class implementation
+	auto info = preserved_information_template<T>(RI_params, A, s, n_elem);
     if (info <= tolerance) {
       for (int i = nbits - 1; i >= 0; i--) {
-      	shave_template<T>(A, n_elem, i, s);
-      	//shave_bits<T>(A, n_elem, i, s); // bits class implementation
-      	auto info = preserved_information_template<T>(A, s, n_elem);
+		shave_bits<T>(RI_params, A, n_elem, i, s); // bits class implementation
+		auto info = preserved_information_template<T>(RI_params, A, s, n_elem);
       	if (info > tolerance) {
       		return i;
       	}
@@ -850,9 +1177,8 @@ int pick_bits_to_shave_template(T *A, size_t n_elem, double tolerance, int nbits
     } else {
   	/* Maybe we aren't throwing out enough. Increase number of bits thrown out */
   	for (int i = nbits + 1; i < max_bits; i++) {
-      	shave_template<T>(A, n_elem, i, s);
-      	//shave_bits<T>(A, n_elem, i, s);
-      	auto info = preserved_information_template<T>(A, s, n_elem);
+		shave_bits<T>(RI_params, A, n_elem, i, s);
+		auto info = preserved_information_template<T>(RI_params, A, s, n_elem);
       	if (info <= tolerance) {
       		return i-1; // XXX: Not sure if this should be i-1 or just i...
       	}
@@ -868,13 +1194,17 @@ int pick_bits_to_shave_template(T *A, size_t n_elem, double tolerance, int nbits
  * @brief Gets the maximum number of bits that can be shaved for a floating point type.
  *
  * @tparam T The floating point type (float or double).
+ * @param RI_params Real information parameters.
  * @return The maximum number of least significant bits that can be cleared while
  *         preserving the exponent bits and sign bit.
  */
 template <typename T>
-int get_max_shave_bits() {
+int get_max_shave_bits(const real_info_params<T> &RI_params) {
   int max_bits = sizeof(T) * CHAR_BIT; 
-  if constexpr (std::is_same_v<T, float>) { 
+  if (RI_params.fixed_point) {
+	max_bits = sizeof(int64_t) * CHAR_BIT;
+	return max_bits - 1;
+  } else if constexpr (std::is_same_v<T, float>) { 
     return max_bits - n_exponent_bits_float - 1;
   } else if constexpr (std::is_same_v<T, double>) {
     return max_bits - n_exponent_bits_double - 1;
@@ -895,56 +1225,89 @@ int get_max_shave_bits() {
  * @return Number of bits that can be shaved while maintaining information above tolerance.
  */
 template <typename T>
-int binary_search(T *A, size_t n_elem, double tolerance, int start_bit, int high_bit, int low_bit) {
-	T s_high[n_elem];
-	T s_low[n_elem];
-    shave_template<T>(A, n_elem, start_bit, s_high);
-    shave_template<T>(A, n_elem, start_bit-1, s_low);
-    //shave_bits<T>(A, n_elem, start_bit, s_high);  // bits class implementation
-    //shave_bits<T>(A, n_elem, start_bit-1, s_low); // bits class implementation
-    //bit_rounding_template<T>(A, n_elem, start_bit, s_high);
-    //bit_rounding_template<T>(A, n_elem, start_bit-1, s_low);
-   	auto info_high = preserved_information_template<T>(A, s_high, n_elem);
-   	auto info_low = preserved_information_template<T>(A, s_low, n_elem);
-	// Note: info_low is always >= info_high since we are shaving fewer bits
-   	if (info_high < tolerance && info_low >= tolerance) {
-   		return start_bit-1;
-   	} else if (info_low < tolerance) {
-		int new_start_bit = (start_bit - low_bit)/2 + low_bit;
-		if (new_start_bit == 0) return new_start_bit;
-		return binary_search<T>(A, n_elem, tolerance, new_start_bit, start_bit, low_bit);
-	} else if (info_high >= tolerance) {
-		int new_start_bit = (high_bit - start_bit)/2 + start_bit;
-		if (new_start_bit == start_bit) return new_start_bit;
-		return binary_search<T>(A, n_elem, tolerance, new_start_bit, high_bit, start_bit);
-	} else {
-		std::cout << "binary search error start bit " << start_bit << " old bits shaved " << start_bit << " info high " << info_high << " info low " << info_low << " tolerance " << tolerance << "\n";
-		return 0;
-	}
+void binary_search(const real_info_params<T> &RI_params, T *A, size_t n_elem, double tolerance, int &start_bit, int high_bit, int low_bit, T *shaved) {
+    // Allocate once per search and reuse both candidates as the bounds narrow.
+    std::vector<T> s_high(n_elem);
+    std::vector<T> s_low(n_elem);
+    for (;;) {
+        shave_bits<T>(RI_params, A, n_elem, start_bit, s_high.data());
+        shave_bits<T>(RI_params, A, n_elem, start_bit - 1, s_low.data());
+        const auto info_high = preserved_information_template<T>(RI_params, A, s_high.data(), n_elem);
+        const auto info_low = preserved_information_template<T>(RI_params, A, s_low.data(), n_elem);
+        // Preserve the existing decisions and output behavior; boundary repairs
+        // and the monotonicity requirement are tracked separately in step 8.
+        if (info_high < tolerance && info_low >= tolerance) {
+            std::copy(s_low.begin(), s_low.end(), shaved);
+            --start_bit;
+            return;
+        } else if (info_low < tolerance) {
+            high_bit = start_bit;
+            start_bit = (start_bit - low_bit) / 2 + low_bit;
+            if (start_bit == 0) {
+                std::copy(s_low.begin(), s_low.end(), shaved);
+                return;
+            }
+        } else if (info_high >= tolerance) {
+            low_bit = start_bit;
+            start_bit = (high_bit - start_bit) / 2 + start_bit;
+            if (start_bit == low_bit) {
+                std::copy(s_high.begin(), s_high.end(), shaved);
+                return;
+            }
+        } else {
+            std::cout << "binary search error start bit " << start_bit << " old bits shaved " << start_bit << " info high " << info_high << " info low " << info_low << " tolerance " << tolerance << "\n";
+            return;
+        }
+    }
 }
 
 /**
  * @brief Picks the number of bits to shave from elements in array A such that the preserved information is above a given tolerance.
  *
  * @tparam T The type of the elements in the input array.
+ * @param RI_params Real information parameters.
  * @param A Pointer to the input array.
  * @param n_elem The number of elements in the input array.
  * @param tolerance The minimum fraction of preserved information required.
  * @param nbits_old The previous number of bits shaved (0 if starting fresh).
  * @return The number of bits to shave from each element in the array.
+ * @param config_file The path to the configuration file.
  */
 template <typename T>
-int pick_bits_to_shave_binary_search_template(T *A, size_t n_elem, double tolerance, int nbits_old) {
-  int max_shave_bits = get_max_shave_bits<T>();
+int pick_bits_to_shave_binary_search_template(const real_info_params<T> &RI_params, T *A, size_t n_elem, double tolerance, int nbits_old, char *config_file, T *shaved) {
+	if (is_constant_array(A, n_elem)) {
+		if (shaved == nullptr) {
+			throw fixed_point_error("Bit selection requires a valid output array.");
+		}
+		if (A != shaved) std::copy_n(A, n_elem, shaved);
+		return 0;
+	}
+	int max_shave_bits = get_max_shave_bits<T>(RI_params);
 
-  bit_pair_count_calls = 0;
-  if (nbits_old == 0) {
-	return binary_search<T>(A, n_elem, tolerance, max_shave_bits/2, max_shave_bits, 0);
-  } else {
-	return binary_search<T>(A, n_elem, tolerance, nbits_old, max_shave_bits, 0);
+  // XXX: Check why do we need this?
+  if (RI_params.mask_zero) {
+    size_t n_non_zero = 0;
+	for (size_t i = 0; i < n_elem; i++) {
+	  if (std::abs(A[i]) >= EPS) {
+		n_non_zero++;
+	  }
+	}
+    if (n_non_zero == 0) {
+      return 0;
+    }
   }
 
-  return 0;
+  bit_pair_count_calls = 0;
+  int start_bit;
+  if (nbits_old == 0) {
+	start_bit = max_shave_bits/2;
+	binary_search<T>(RI_params, A, n_elem, tolerance, start_bit, max_shave_bits, 0, shaved);
+  } else {
+	start_bit = nbits_old;
+	binary_search<T>(RI_params, A, n_elem, tolerance, start_bit, max_shave_bits, 0, shaved);
+  }
+
+  return start_bit;
 }
 
 #endif

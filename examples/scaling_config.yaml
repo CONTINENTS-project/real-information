@@ -1,0 +1,9 @@
+# Config for scaling.py — real-information bit shaving in floating-point mode.
+# fixed_point MUST be false for this experiment (pure float bit shaving).
+
+use_real_info: true
+default_real_info: 0.99
+
+mantissa_only: true
+mask_zero: false
+fixed_point: false
