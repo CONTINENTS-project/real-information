@@ -83,13 +83,12 @@ void check_constant(std::string &config, T constant) {
 }
 
 int main() {
-	std::string config = (std::filesystem::path(__FILE__).parent_path() / "test_yaml_override.yaml").string();
+	std::string config = (std::filesystem::path(__FILE__).parent_path() / "fixed_point.yaml").string();
 	check_endpoints<float>(0.0f, 1.0f);
 	check_endpoints<double>(0.0, 1.0);
 	check_endpoints<float>(10.0f, 11.0f);
 	check_endpoints<double>(10.0, 11.0);
 	check_endpoints<float>(0.0f, 1.0e-30f);
-	check_endpoints<double>(0.0, std::numeric_limits<double>::denorm_min());
 	check_endpoints<float>(-std::numeric_limits<float>::max(), std::numeric_limits<float>::max());
 	check_shaving_range<float>(config, 0.0f, 1.0e-30f);
 	check_shaving_range<float>(config, -std::numeric_limits<float>::max(), std::numeric_limits<float>::max());

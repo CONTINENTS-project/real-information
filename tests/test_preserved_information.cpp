@@ -8,7 +8,7 @@ int main() {
 
 	float *shaved_data = new float[n_elements];
 	shave_template<float>(data, n_elements, 4, shaved_data);
-	std::string config_file = test_data_path("test_yaml_override.yaml");
+	std::string config_file = test_data_path("real_info.yaml");
 	real_info_params<float> params(config_file.data(), data, n_elements);
 	double preserved_information = preserved_information_template<float>(params, data, shaved_data, n_elements);
 

@@ -6,7 +6,7 @@ int main() {
 	const std::string filename = test_data_path("A.txt");
 	read_input_data(filename.c_str(), data, n_elements);
 
-	std::string config_file = test_data_path("test_yaml_override.yaml");
+	std::string config_file = test_data_path("real_info.yaml");
 	real_info_params<float> params(config_file.data(), data, n_elements);
 
 	size_t bit_counts[32];

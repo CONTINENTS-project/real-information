@@ -10,7 +10,7 @@ int main() {
 	std::memcpy(sorted_data, data, n_elements * sizeof(float));
 	std::sort(sorted_data, sorted_data + n_elements);
 	double *info = new double[32];
-	std::string config_file = test_data_path("test_yaml_override.yaml");
+	std::string config_file = test_data_path("real_info.yaml");
 	real_info_params<float> params(config_file.data(), sorted_data, n_elements);
 	bitwise_real_information<float>(params, sorted_data, n_elements, info);
 
