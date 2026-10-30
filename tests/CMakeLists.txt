@@ -5,6 +5,17 @@
 file(GLOB TEST_CPP_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp")
 file(GLOB TEST_PY_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/*.py")
 
+include(CheckLanguage)
+check_language(Fortran)
+if(CMAKE_Fortran_COMPILER)
+    enable_language(Fortran)
+    add_executable(test_fortran_abi ../src/bit_info_mod.f90 test_fortran_abi.f90)
+    target_link_libraries(test_fortran_abi PRIVATE bit_info)
+    add_test(NAME test_fortran_abi COMMAND test_fortran_abi "${CMAKE_CURRENT_SOURCE_DIR}/fixed_point.yaml")
+else()
+    message(STATUS "Fortran compiler not found; skipping test_fortran_abi")
+endif()
+
 if(TEST_CPP_SOURCES)
     foreach(test_src IN LISTS TEST_CPP_SOURCES)
         get_filename_component(test_name "${test_src}" NAME_WE)

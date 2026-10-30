@@ -35,6 +35,10 @@ install(FILES src/real_info.py
     DESTINATION .
 )
 
+install(FILES src/bit_info_mod.f90
+    DESTINATION include
+)
+
 if(BUILD_TESTING)
     add_subdirectory(tests)
 endif()
