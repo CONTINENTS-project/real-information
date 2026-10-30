@@ -2,6 +2,7 @@
 #define BIT_INFO_H
 
 #include <algorithm>
+#include <charconv>
 #include <concepts>
 #include <climits>
 #include <limits>
@@ -9,6 +10,8 @@
 #include <iostream>
 #include <fstream>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 #include <unordered_map>
 #include <type_traits>
@@ -31,53 +34,90 @@ inline std::string yaml_trim(const std::string &s) {
 	return s.substr(start, end - start + 1);
 }
 
+class configuration_error : public std::invalid_argument {
+public:
+	using std::invalid_argument::invalid_argument;
+};
+
+// Convert the entire scalar directly into its destination type, without narrowing.
+template <typename T>
+T parse_yaml_scalar(const std::string &value, const std::string &location) {
+	if constexpr (std::is_same_v<T, std::string>) {
+		if (!value.empty()) return value;
+	} else if constexpr (std::is_same_v<T, bool>) {
+		if (value == "true" || value == "True" || value == "TRUE") return true;
+		if (value == "false" || value == "False" || value == "FALSE") return false;
+	} else if constexpr (std::is_integral_v<T> || std::is_floating_point_v<T>) {
+		std::string_view text(value);
+		if (!text.empty() && text.front() == '+') {
+			text.remove_prefix(1);
+			if (text.empty() || text.front() == '+' || text.front() == '-') {
+				throw configuration_error(location + ": invalid numeric scalar '" + value + "'");
+			}
+		}
+		if (!text.empty()) {
+			T parsed{};
+			const auto result = std::from_chars(text.data(), text.data() + text.size(), parsed);
+			if (result.ec == std::errc{} && result.ptr == text.data() + text.size()) {
+				if constexpr (std::is_integral_v<T>) return parsed;
+				else if (std::isfinite(parsed)) return parsed;
+			}
+		}
+	} else {
+		static_assert(!sizeof(T), "Unsupported type for read_yaml_scalar");
+	}
+	throw configuration_error(location + ": invalid scalar '" + value + "'");
+}
+
+// Retain the source once so parameter construction does not reopen it per flag.
+struct yaml_config {
+	std::string filename;
+	std::vector<std::string> lines;
+
+	explicit yaml_config(const char *path) {
+		if (path == nullptr || *path == '\0') {
+			throw configuration_error("Configuration path must be nonempty");
+		}
+		filename = path;
+		std::ifstream file(path);
+		if (!file.is_open()) throw configuration_error(filename + ": could not open configuration file");
+		load(file);
+	}
+
+	yaml_config(std::istream &input, const std::string &source) : filename(source) {
+		load(input);
+	}
+
+private:
+	void load(std::istream &input) {
+		std::string line;
+		while (std::getline(input, line)) {
+			line.erase(line.find('#') == std::string::npos ? line.size() : line.find('#'));
+			lines.push_back(line);
+		}
+		if (input.bad() || (input.fail() && !input.eof())) {
+			throw configuration_error(filename + ": failed to read configuration file");
+		}
+	}
+};
+
 /**
- * @brief Reads a single scalar value for a given key from a flat "key: value" YAML file.
+ * @brief Reads a required scalar, with an optional variable override.
  *
  * Only supports one "key: value" pair per line; nested/list structures are not handled.
  * Lines are trimmed of trailing '#' comments before parsing.
  *
  * @tparam T Type of the scalar to parse (bool, integral, floating-point, or std::string).
- * @param config_file Path to the YAML file.
+ * @param config Loaded configuration source.
  * @param key Key to search for.
- * @param out Pointer to store the parsed value; left unmodified if the key isn't found.
+ * @param out Pointer to store the parsed value; unchanged on configuration errors.
  */
 template <typename T>
-void read_yaml_scalar(const char *config_file, const std::string &key, T *out, const char *var_name = nullptr) {
-	std::ifstream file(config_file);
-	if (!file.is_open()) {
-		std::cerr << "Could not open config file: " << config_file << "\n";
-		return;
-	}
-
-	// Read all lines and strip comments
-	std::vector<std::string> lines;
-	std::string line;
-	while (std::getline(file, line)) {
-		size_t comment_pos = line.find('#');
-		if (comment_pos != std::string::npos) line = line.substr(0, comment_pos);
-		lines.push_back(line);
-	}
-
-	auto parse_and_set = [&](const std::string &value) {
-		if (value.empty()) return false;
-		if constexpr (std::is_same_v<T, bool>) {
-			*out = (value == "true" || value == "True");
-		} else if constexpr (std::is_integral_v<T>) {
-			*out = static_cast<T>(std::stol(value));
-		} else if constexpr (std::is_floating_point_v<T>) {
-			*out = static_cast<T>(std::stod(value));
-		} else if constexpr (std::is_same_v<T, std::string>) {
-			*out = value;
-		} else {
-			static_assert(!sizeof(T), "Unsupported type for read_yaml_scalar");
-		}
-		return true;
-	};
-
-	auto ltrim = [](const std::string &s) {
-		size_t p = s.find_first_not_of(" \t\r\n");
-		return (p == std::string::npos) ? std::string("") : s.substr(p);
+void read_yaml_scalar(const yaml_config &config, const std::string &key, T *out, const char *var_name = nullptr) {
+	if (out == nullptr) throw configuration_error(config.filename + ": null scalar output for " + key);
+	const auto &lines = config.lines;
+	auto parse_and_set = [&](const std::string &value, size_t line_number) {
+		*out = parse_yaml_scalar<T>(value, config.filename + ":" + std::to_string(line_number) + ": " + key);
 	};
 
 	auto leading_spaces = [](const std::string &s) {
@@ -104,10 +144,10 @@ void read_yaml_scalar(const char *config_file, const std::string &key, T *out, c
 
 					if (lines[j][first_non] == '-') {
 						// Start a new block. Remove the '-' to simplify parsing
-						std::vector<std::string> block;
+						std::vector<std::pair<std::string, size_t>> block;
 						std::string item = lines[j];
 						item.erase((size_t)first_non, 1);
-						block.push_back(item);
+						block.emplace_back(item, j + 1);
 						++j;
 						// collect indented lines belonging to this block
 						while (j < lines.size()) {
@@ -119,20 +159,22 @@ void read_yaml_scalar(const char *config_file, const std::string &key, T *out, c
 							// top-level unindented -> end of variables list
 							if (first_non2 == 0) break;
 							// otherwise this line belongs to the current block
-							block.push_back(lines[j]);
+							block.emplace_back(lines[j], j + 1);
 							++j;
 						}
 
 						// parse block into key->value pairs
 						std::string block_var_name;
 						std::unordered_map<std::string,std::string> kv;
-						for (const auto &bl : block) {
+						std::unordered_map<std::string, size_t> key_lines;
+						for (const auto &[bl, line_number] : block) {
 							size_t colon_pos = bl.find(':');
 							if (colon_pos == std::string::npos) continue;
 							std::string k = yaml_trim(bl.substr(0, colon_pos));
 							std::string v = yaml_trim(bl.substr(colon_pos + 1));
 							if (!k.empty()) {
 								kv[k] = v;
+								key_lines[k] = line_number;
 								if (k == "var_name") block_var_name = v;
 							}
 						}
@@ -140,7 +182,8 @@ void read_yaml_scalar(const char *config_file, const std::string &key, T *out, c
 						if (!block_var_name.empty() && block_var_name == var_name) {
 							auto it = kv.find(key);
 							if (it != kv.end()) {
-									if (parse_and_set(it->second)) return;
+									parse_and_set(it->second, key_lines.at(key));
+									return;
 							}
 							// matching variable found but no override for key: fall through to global lookup
 							break;
@@ -156,16 +199,24 @@ void read_yaml_scalar(const char *config_file, const std::string &key, T *out, c
 	}
 
 	// Fallback: search for global key anywhere in the file
-	for (const auto &ln : lines) {
+	for (size_t index = 0; index < lines.size(); ++index) {
+		const auto &ln = lines[index];
 		size_t colon_pos = ln.find(':');
 		if (colon_pos == std::string::npos) continue;
 		std::string k = yaml_trim(ln.substr(0, colon_pos));
 		if (k != key) continue;
 		std::string v = yaml_trim(ln.substr(colon_pos + 1));
-		if (parse_and_set(v)) return;
+		parse_and_set(v, index + 1);
+		return;
 	}
 
-	std::cerr << "Key \"" << key << "\" not found in config file: " << config_file << "\n";
+	throw configuration_error(config.filename + ": required key '" + key + "' not found");
+}
+
+template <typename T>
+void read_yaml_scalar(const char *config_file, const std::string &key, T *out, const char *var_name = nullptr) {
+	const yaml_config config(config_file);
+	read_yaml_scalar(config, key, out, var_name);
 }
 
 class fixed_point_error : public std::invalid_argument {
@@ -225,19 +276,24 @@ bool is_constant_array(const T *x, size_t n_elem) {
 template <typename T>
 class real_info_params {
 	private:
-	    char *config_file;
+	    char *config_file = nullptr;
+
+		void load_configuration() {
+			const yaml_config config(config_file);
+			read_yaml_scalar(config, "mantissa_only", &mantissa_only);
+			read_yaml_scalar(config, "mask_zero", &mask_zero);
+			read_yaml_scalar(config, "fixed_point", &fixed_point);
+		}
 
 	public:
-	    bool mantissa_only;
-		bool mask_zero;
-		bool fixed_point;
-		fixed_point_range<T> fixed_range;
+	    bool mantissa_only = false;
+		bool mask_zero = false;
+		bool fixed_point = false;
+		fixed_point_range<T> fixed_range{};
 	
 		real_info_params(char *config_file) {
 			this->config_file = config_file;
-			read_yaml_scalar(config_file, "mantissa_only", &mantissa_only);
-			read_yaml_scalar(config_file, "mask_zero", &mask_zero);
-			read_yaml_scalar(config_file, "fixed_point", &fixed_point);
+			load_configuration();
 			if (fixed_point) {
 				throw fixed_point_error("Fixed-point initialization requires input data.");
 			}
@@ -245,9 +301,7 @@ class real_info_params {
 
 		real_info_params(char *config_file, T *data, size_t n_elem) {
 			this->config_file = config_file;
-			read_yaml_scalar(config_file, "mantissa_only", &mantissa_only);
-			read_yaml_scalar(config_file, "mask_zero", &mask_zero);
-			read_yaml_scalar(config_file, "fixed_point", &fixed_point);
+			load_configuration();
 			if (fixed_point) {
 				fixed_range = get_fixed_point_init_params(data, n_elem);
 			}
