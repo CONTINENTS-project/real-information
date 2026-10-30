@@ -1,25 +1,20 @@
 #include "bit_info.h"
 
+#include <cstdlib>
+
 namespace {
 	thread_local std::string fixed_point_error_message;
 
-	// Keep fixed-point validation exceptions inside the C++ boundary.
-	// Python translates the message to ValueError.
+	// Report fixed-point validation failures and terminate the calling process.
 	template <typename Function>
 	auto fixed_point_call(Function function) -> std::invoke_result_t<Function> {
-		using Result = std::invoke_result_t<Function>;
 		fixed_point_error_message.clear();
 		try {
 			return function();
 		} catch (const fixed_point_error &error) {
 			fixed_point_error_message = error.what();
-			if constexpr (std::is_void_v<Result>) {
-				return;
-			} else if constexpr (std::is_integral_v<Result>) {
-				return -1;
-			} else {
-				return std::numeric_limits<Result>::quiet_NaN();
-			}
+			std::cerr << "Fixed-point error: " << fixed_point_error_message << std::endl;
+			std::exit(EXIT_FAILURE);
 		}
 	}
 }

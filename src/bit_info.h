@@ -173,10 +173,9 @@ public:
 	using std::invalid_argument::invalid_argument;
 };
 
-// C callers must check this after operations that initialize a fixed-point
-// range. Errors return -1 from selectors or NaN from preservation; void calls
-// report errors through this accessor. The message is local to the calling
-// thread and cleared by its next guarded call. A null pointer means success.
+// Guarded C entry points print fixed-point validation errors and terminate
+// the process. This accessor is retained for existing bindings and returns
+// nullptr after successful calls.
 extern "C" const char *real_info_last_fixed_point_error();
 
 template <typename T>
