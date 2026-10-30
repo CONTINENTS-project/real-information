@@ -60,8 +60,9 @@ signed zeros, without a fixed-point encode/decode round trip. Native operations
 preserve infinities and NaN payloads. Finite rounding may overflow to infinity.
 Half-shaving clears the lowest `n` bits and sets bit `n - 1`; nearest-even
 rounding compares the discarded bits with the midpoint and resolves ties using
-the least-significant retained bit. The same unsigned implementation backs
-`bits<T>`, the legacy array functions, and the native 32/64-bit bitset helpers.
+the least-significant retained bit. The unsigned implementation backs `bits<T>`
+and the `*_bits` array functions. Obsolete transformation and bit-counting
+implementations have been removed.
 
 Fixed-point operations keep codes within `[0, Q]`, where `Q = 2^63 - 1024`.
 Setting, half-shaving, or rounding above that endpoint saturates to `Q` before

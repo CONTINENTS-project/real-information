@@ -7,10 +7,10 @@ int main() {
 	read_input_data(filename.c_str(), data, n_elements);
 
 	float *shaved_data = new float[n_elements];
-	shave_template<float>(data, n_elements, 4, shaved_data);
 	double *R = new double[32];
 	std::string config_file = test_data_path("real_info.yaml");
 	real_info_params<float> params(config_file.data(), data, n_elements);
+	shave_bits<float>(params, data, n_elements, 4, shaved_data);
 	redundancy<float>(params, data, shaved_data, n_elements, R);
 
 	double R_expected[32];

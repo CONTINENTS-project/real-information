@@ -184,8 +184,10 @@ negative shift for zero bits. Half-shaving used incorrect bit positions and a
 32-bit starting mask for doubles.
 
 - [x] Consolidate shaving, setting, half-shaving, and rounding into shared unsigned
-  operations used by `bits<T>`, legacy array wrappers, and native bitset helpers.
-  Convert native values with `std::bit_cast` and bitsets through their public API.
+  operations used by `bits<T>` and the `*_bits` array functions. Convert native
+  values with `std::bit_cast`; remove obsolete transformation wrappers and
+  bitset-based counting paths, including commented implementations. The count
+  test now exercises the array and single-bit `bit_count_bits` overloads.
 - [x] Make zero-bit operations exact identities, including fixed-point arrays
   without an encode/decode round trip and signed-zero bit patterns.
 - [x] Validate counts before modifying output: 0–23 for native float, 0–52 for
@@ -309,9 +311,11 @@ machine-specific absolute paths, and input loading does not check read failures.
 - [ ] Separate configuration, metrics, selection, and bindings.
 - [ ] Introduce consistent namespaces and immutable constants.
 - [ ] Remove debug output and obsolete comments.
-- [ ] Address duplicate definitions in `src/my_rounding.h`.
+- [x] Remove duplicate implementations from `src/my_rounding.h`; retain the
+  include shim for the current public header.
 - [ ] Address the non-inline header definition of `entropy`.
-- [ ] Replace unsafe `std::bitset` reinterpretation.
+- [x] Remove unsafe bitset reinterpretation and the obsolete counting paths that
+  used it. Standalone rounding diagnostics also use unsigned-word formatting.
 - [ ] Keep generated binaries and caches in build/output directories.
 
 The original finding about fixed-point operators attempting to use a nonexistent

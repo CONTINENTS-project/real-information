@@ -11,7 +11,7 @@ int main() {
 
 	size_t bit_counts[32];
 	size_t n_non_zero = 0;
-	bit_count<float>(params, data, n_elements, bit_counts, &n_non_zero);
+	bit_count_bits<float>(params, data, n_elements, bit_counts, &n_non_zero);
 
 	size_t bit_counts_expected[32];
 	read_yaml_list(test_data_path("expected.yaml"), "bit_counts", bit_counts_expected, 32);
@@ -20,10 +20,10 @@ int main() {
 		test_assert(bit_counts[i] == bit_counts_expected[i], __FILE__, __LINE__, message);
 	}
 
-	bit_count_bits<float>(params, data, n_elements, bit_counts, &n_non_zero);
 	for (int i = 0; i < 32; i++) {
-		std::string message = "Bit count (bits class) for bit " + std::to_string(i) + " does not match expected value " + std::to_string(bit_counts[i]) + " != " + std::to_string(bit_counts_expected[i]);
-		test_assert(bit_counts[i] == bit_counts_expected[i], __FILE__, __LINE__, message);
+		const size_t count = bit_count_bits<float>(params, data, n_elements, i, &n_non_zero);
+		std::string message = "Single-bit count for bit " + std::to_string(i) + " does not match expected value " + std::to_string(count) + " != " + std::to_string(bit_counts_expected[i]);
+		test_assert(count == bit_counts_expected[i], __FILE__, __LINE__, message);
 	}
 
 	return 0;

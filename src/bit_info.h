@@ -8,7 +8,6 @@
 #include <concepts>
 #include <climits>
 #include <limits>
-#include <bitset>
 #include <iostream>
 #include <fstream>
 #include <string>
@@ -23,8 +22,6 @@
 #include <cstdint>
 #include <stdexcept>
 #include <mpi.h>
-
-inline int get_n_exponent_bits(int nbits);
 
 // Set EPS
 static const float EPS = 1e-16;
@@ -611,34 +608,6 @@ bool copy_unmodified(const real_info_params<T> &params, const T *input,
     return true;
 }
 
-template <typename T>
-void transform_native_array(T *input, size_t n_elem, int n, T *output,
-                            bit_operation operation, bool alternate_shave = false) {
-    validate_bit_count<T>(n);
-    if (n_elem == 0) return;
-    if (input == nullptr || output == nullptr) {
-        throw fixed_point_error("Bit operations require valid input and output arrays");
-    }
-    if (n == 0) {
-        if (input != output) std::memmove(output, input, n_elem * sizeof(T));
-        return;
-    }
-    for (size_t i = 0; i < n_elem; ++i) {
-        const auto word = std::bit_cast<native_word<T>>(input[i]);
-        const auto selected = alternate_shave && i % 2 != 0 ? bit_operation::shave : operation;
-        output[i] = std::bit_cast<T>(transform_native<T>(word, n, selected));
-    }
-}
-
-template <size_t nbits>
-void transform_bitset(std::bitset<nbits> *value, int n, bit_operation operation) {
-    static_assert(nbits == 32 || nbits == 64, "Native bitset operations require 32 or 64 bits");
-    using T = std::conditional_t<nbits == 32, float, double>;
-    if (value == nullptr) throw fixed_point_error("Bit operation requires a valid bitset");
-    const auto word = static_cast<native_word<T>>(value->to_ullong());
-    *value = std::bitset<nbits>(transform_native<T>(word, n, operation));
-}
-
 } // namespace real_info_detail
 
 /**
@@ -803,11 +772,6 @@ void groom_bits(const real_info_params<T> &RI_params, T *A, size_t n_elem, int n
 
 static int bit_pair_count_calls = 0;
 
-template<std::floating_point T>
-struct HELP {
-	using type = std::bitset<sizeof(T) * CHAR_BIT>;
-};
-
 static int n_exponent_bits_float = 8;
 static int n_exponent_bits_double = 11;
 static constexpr int n_joint_counts = 4;
@@ -818,47 +782,6 @@ static int n_counts = 2;
 template <typename T, typename Value, size_t CountsPerBit = 1>
 using bit_metric_buffer = std::array<Value,
     CountsPerBit * std::max(sizeof(T), sizeof(int64_t)) * CHAR_BIT>;
-
-/** 
- *  @brief Gets the number of exponent bits for a given bit size following IEEE 754 standard.
- *  @param nbits The bit size.
- *  @return The number of exponent bits.
- */
-inline int get_n_exponent_bits(int nbits) {
-	if (nbits == 32) {
-		return 23;
-	} else if (nbits == 64) {
-		return 52;
-	} else {
-		std::cerr << "Unsupported bit size: " << nbits << "\n";
-		return 0;
-	}
-}
-
-// XXX: temporarily dump these helper functions here
-/**
- * @brief Counts the number of bits set to 1 in a specific bit position across an array.
- * @param A Input array of type `T`.
- * @param n_elem Number of elements in the array.
- * @param i Bit position to count (0 for least significant bit).
- */
-template <typename T>
-size_t bit_count(const real_info_params<T> &RI_params, T *A, size_t n_elem, int i, size_t *non_zero) {
-	size_t count = 0;
-
-	*non_zero = 0;
-	for (size_t j = 0; j < n_elem; j++) {
-		if (RI_params.mask_zero && std::abs(A[j]) < EPS) {
-			continue;
-		}
-		auto *b0 = reinterpret_cast<typename HELP<T>::type*>(&A[j]);
-		count += (*b0)[i];
-		(*non_zero)++;
-	}
-	assert(*non_zero > 0);
-
-	return count;
-}
 
 /**
  * @brief Counts the number of bits set to 1 in a specific bit position across an array using the `bits` class.
@@ -903,15 +826,6 @@ size_t bit_count_bits(const real_info_params<T> &RI_params, T *A, size_t n_elem,
  * @param n_elem Number of elements in the array.
  * @param c Output array to store the count of bits set to 1 for each bit position.
  */
-template <typename T>
-void bit_count(const real_info_params<T> &RI_params, T *A, size_t n_elem, size_t *c, size_t *non_zero) {
-	int n_bits = sizeof(A[0]) * CHAR_BIT;
-	int start_bit, end_bit;
-	get_start_end_bits<T>(RI_params, n_bits, &start_bit, &end_bit);
-	for (int i = start_bit; i < end_bit; i++) {
-		c[i - start_bit] = bit_count(RI_params, A, n_elem, i, non_zero);
-	}
-}
 template <typename T>
 void bit_count_bits(const real_info_params<T> &RI_params, T *A, size_t n_elem, size_t *c, size_t *non_zero) {
 	int n_bits = sizeof(A[0]) * CHAR_BIT;
@@ -1048,67 +962,6 @@ void bit_pair_count_bits(const real_info_params<T> &RI_params, T *A, T *B, size_
 }
 
 /**
- * @brief Helper function to compute pair counts at a particular position in two numbers represented as bitsets.
- * @param a First number represented as a bitset.
- * @param b Second number represented as a bitset.
- * @param j Bit position to compare.
- * @param p Output array to store the counts of each bit pair.
- */
-template <int n_bits>
-void bit_pair_count(std::bitset<n_bits> a, std::bitset<n_bits> b, int j, int *p) {
-	for (int i = 0; i < 4; i++) p[i] = 0;
-	if (a[j] == 0 && b[j] == 0) {
-		p[0] = 1;
-	} else if (a[j] == 0 && b[j] == 1) {
-		p[1] = 1;
-	} else if (a[j] == 1 && b[j] == 0) {
-		p[2] = 1;
-	} else if (a[j] == 1 && b[j] == 1) {
-		p[3] = 1;
-	}
-}
-
-/**
- * @brief Counts the occurrences of bit pairs (00, 01, 10, 11) between two arrays.
- *
- * @tparam T The type of the elements in the input arrays.
- * @param A Pointer to the first array.
- * @param B Pointer to the second array.
- * @param n_elem The number of elements in the arrays A and B.
- * @param pair_counts Pointer to an array to store the counts of each bit pair.
- * @param RI_params The parameters for the real information calculation.
- */
-template <typename T>
-void bit_pair_count(const real_info_params<T> &RI_params, T *A, T *B, size_t n_elem, size_t *pair_counts, size_t *non_zero) {
-	*non_zero = 0;
-	bit_pair_count_calls += 1;
-	const int n_bits = sizeof(T) * CHAR_BIT;
-	int start_bit, end_bit;
-	get_start_end_bits<T>(RI_params, n_bits, &start_bit, &end_bit);
-	int total_bits = end_bit - start_bit;
-	#pragma omp parallel for reduction(+:pair_counts[:total_bits * n_joint_counts])
-	for (size_t i = 0; i < n_elem; i++) {
-		if (RI_params.mask_zero && std::abs(A[i]) < EPS && std::abs(B[i]) < EPS) {
-			continue;
-		}
-		auto a = reinterpret_cast<typename HELP<T>::type *>(&A[i]);
-		auto b = reinterpret_cast<typename HELP<T>::type *>(&B[i]);
-		int pair_count[4];
-		for (int j = start_bit; j < end_bit; j++) {
-			bit_pair_count<sizeof(T) * CHAR_BIT>(*a, *b, j, pair_count);
-			pair_counts[(j - start_bit) * n_joint_counts] += pair_count[0];
-			pair_counts[(j - start_bit) * n_joint_counts + 1] += pair_count[1];
-			pair_counts[(j - start_bit) * n_joint_counts + 2] += pair_count[2];
-			pair_counts[(j - start_bit) * n_joint_counts + 3] += pair_count[3];
-		}
-		//XXX: change this to a reduction of some sort`
-		#pragma omp critical
-		(*non_zero)++;
-	}
-}
-// End helper functions
-
-/**
  * @brief Computes the entropy of each bit position in an array.
  *
  * @tparam T The type of the elements in the input array.
@@ -1123,7 +976,6 @@ void bit_count_entropy(const real_info_params<T> &RI_params, T *A, size_t n_elem
 	get_start_end_bits<T>(RI_params, n_bits, &start_bit, &end_bit);
 	bit_metric_buffer<T, size_t> c{};
 	size_t n_non_zero;
-	//bit_count(A, n_elem, c);
 	bit_count_bits(RI_params, A, n_elem, c.data(), &n_non_zero); // bits class implementation
 	assert(n_non_zero > 0);
 
@@ -1133,53 +985,6 @@ void bit_count_entropy(const real_info_params<T> &RI_params, T *A, size_t n_elem
 		double p_array[2] = {p, 1 - p};
 		H[i - start_bit] = entropy(p_array, 2);
 	}
-}
-
-// Compatibility helpers use the same unsigned kernels as bits<T>; std::bitset
-// objects are converted through their public API, never their object layout.
-template <size_t nbits>
-void shave_bitset(std::bitset<nbits> *value, int n) {
-    real_info_detail::transform_bitset(value, n, real_info_detail::bit_operation::shave);
-}
-
-template <size_t nbits>
-void set_bitset(std::bitset<nbits> *value, int n) {
-    real_info_detail::transform_bitset(value, n, real_info_detail::bit_operation::set);
-}
-
-template <size_t nbits>
-void halfshave_bitset(std::bitset<nbits> *value, int n) {
-    real_info_detail::transform_bitset(value, n, real_info_detail::bit_operation::halfshave);
-}
-
-template <size_t nbits>
-void round_bitset(std::bitset<nbits> *value, int n) {
-    real_info_detail::transform_bitset(value, n, real_info_detail::bit_operation::round);
-}
-
-template <typename T>
-void shave_template(T *input, size_t n_elem, int n, T *output) {
-    real_info_detail::transform_native_array(input, n_elem, n, output, real_info_detail::bit_operation::shave);
-}
-
-template <typename T>
-void set_template(T *input, size_t n_elem, int n, T *output) {
-    real_info_detail::transform_native_array(input, n_elem, n, output, real_info_detail::bit_operation::set);
-}
-
-template <typename T>
-void halfshave_template(T *input, size_t n_elem, int n, T *output) {
-    real_info_detail::transform_native_array(input, n_elem, n, output, real_info_detail::bit_operation::halfshave);
-}
-
-template <typename T>
-void bit_rounding_template(T *input, size_t n_elem, int n, T *output) {
-    real_info_detail::transform_native_array(input, n_elem, n, output, real_info_detail::bit_operation::round);
-}
-
-template <typename T>
-void groom_template(T *input, size_t n_elem, int n, T *output) {
-    real_info_detail::transform_native_array(input, n_elem, n, output, real_info_detail::bit_operation::set, true);
 }
 
 /**
@@ -1201,7 +1006,6 @@ void mutual_information(const real_info_params<T> &RI_params, T *A, T *B, size_t
 
 	bit_metric_buffer<T, size_t, n_joint_counts> pair_counts{};
 	size_t n_non_zero;
-	//bit_pair_count(A, B, n_elem, pair_counts, &n_non_zero);
 	bit_pair_count_bits(RI_params, A, B, n_elem, pair_counts.data(), &n_non_zero); // bits class implementation
 	assert(n_non_zero > 0);
 
@@ -1350,7 +1154,6 @@ int pick_bits_to_shave_template(const real_info_params<T> &RI_params, T *A, size
   if (nbits_old == 0) {
     /* Start with shaving more bits rather than less */
     for (int i = start_bit; i >= 0; i--) {
-    	//shave_template<T>(A, n_elem, i, s);
 		shave_bits<T>(RI_params, A, n_elem, i, s); // bits class implementation
 		auto info = preserved_information_template<T>(RI_params, A, s, n_elem);
     	if (info > tolerance) {
@@ -1361,12 +1164,10 @@ int pick_bits_to_shave_template(const real_info_params<T> &RI_params, T *A, size
     int nbits = nbits_old;
     	
     /* Check if we should retain more bits first */
-    //shave_template<T>(A, n_elem, nbits, s);
 	shave_bits<T>(RI_params, A, n_elem, nbits, s); // bits class implementation
 	auto info = preserved_information_template<T>(RI_params, A, s, n_elem);
     if (info <= tolerance) {
       for (int i = nbits - 1; i >= 0; i--) {
-      	//shave_template<T>(A, n_elem, i, s);
 		shave_bits<T>(RI_params, A, n_elem, i, s); // bits class implementation
 		auto info = preserved_information_template<T>(RI_params, A, s, n_elem);
       	if (info > tolerance) {
@@ -1376,7 +1177,6 @@ int pick_bits_to_shave_template(const real_info_params<T> &RI_params, T *A, size
     } else {
   	/* Maybe we aren't throwing out enough. Increase number of bits thrown out */
   	for (int i = nbits + 1; i < max_bits; i++) {
-      	//shave_template<T>(A, n_elem, i, s);
 		shave_bits<T>(RI_params, A, n_elem, i, s);
 		auto info = preserved_information_template<T>(RI_params, A, s, n_elem);
       	if (info <= tolerance) {
