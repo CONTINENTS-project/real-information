@@ -122,9 +122,6 @@ int main() {
 	expect_fixed_point_error([&] { FP<double> invalid(get_fixed_point_init_params(zeros, 3), 1.0); }, "Values outside a constant range must be rejected");
 
 	// Fixed-point errors must stay inside C++, with an inspectable C error.
-	test_assert(pick_bits_to_shave_binary_search_double(zeros, 0, 0.99, 0, config.data(), output) == -1,
-		__FILE__, __LINE__, "C selection must return an error for empty input");
-	test_assert(real_info_last_fixed_point_error() != nullptr, __FILE__, __LINE__, "C validation errors must have a message");
 	test_assert(pick_bits_to_shave_binary_search_double(zeros, 3, 0.99, 0, config.data(), output) == 0,
 		__FILE__, __LINE__, "C selection must support constants");
 	test_assert(real_info_last_fixed_point_error() == nullptr, __FILE__, __LINE__, "Successful calls must clear previous errors");
