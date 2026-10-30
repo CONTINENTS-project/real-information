@@ -207,20 +207,54 @@ also passed with both sanitizers; existing redundancy/preservation expectations
 and a strict binding-source syntax check passed. Full CMake/CTest verification
 in an approved allocation remains pending.
 
-## 7. Use consistent samples for information metrics
+## 7. Use consistent samples for information metrics — implemented
 
 Relevant source: pair counting, marginal entropy, and redundancy in
 [src/bit_info.h](src/bit_info.h).
 
-Pair counting excludes a pair only when both values are masked, whereas marginal
-entropy excludes masked values independently. Normalized redundancy consequently
-combines different populations.
+Previously, pair counting excluded a pair only when both values were masked,
+whereas the marginal entropies used for redundancy excluded masked values
+independently. Normalized redundancy consequently combined different populations.
 
-- [ ] Use one eligibility mask for each paired calculation.
-- [ ] Replace `M[i] == HA[i] == HB[i] == 0` with explicit conditions.
-- [ ] Initialize every output.
-- [ ] Define remaining no-sample and zero-information cases consistently with the
+Agreed masking policy: with `mask_zero` enabled, retain a pair whenever either
+value is nonzero under the existing `EPS` threshold; skip only pairs for which
+both values have `abs(value) < EPS`. Compute mutual information and both marginal
+entropies from those same retained rows, including a zero-valued member when its
+partner is nonzero. With masking disabled, retain all rows.
+
+For `bitwise_real_information`, the arrays are views shifted by one index, so
+different masks occur at transitions between masked and nonmasked regions. Keep
+those transitions in all paired metrics. The preservation path also calls
+`redundancy` on the original and shaved arrays, rather than shifted views; apply
+the same eligibility rule there.
+
+- [x] Preserve the existing pair eligibility rule and derive mutual information
+  and both marginal entropies from the same joint counts. Standalone single-array
+  entropy continues to mask values independently.
+- [x] Replace `M[i] == HA[i] == HB[i] == 0` with explicit conditions.
+- [x] Initialize every requested count and metric output; pair counts overwrite
+  previous contents and use an OpenMP reduction for the retained sample count.
+- [x] Define remaining no-sample and zero-information cases consistently with the
   constant-array convention introduced in step 1.
+
+Nonempty inputs with all samples masked return zero entropy, mutual information,
+and redundancy. A singleton has zero adjacent mutual information. Empty or null
+analysis inputs are rejected. For retained samples, equal constant bits have
+redundancy one and different constant bits have redundancy zero; ordinary
+redundancy is bounded to [0, 1] against floating-point roundoff. Whenever total
+spatial information is zero, preservation uses the step 1 convention: one for
+bit-for-bit identical arrays and zero otherwise, including nonconstant arrays.
+
+Added [tests/test_information_metrics.cpp](tests/test_information_metrics.cpp)
+for native float/double and 63-bit fixed-point metrics, full-width and
+mantissa-only modes, mixed masking, shifted feature boundaries, the `EPS`
+threshold, output initialization, constants, all-masked inputs, singleton and
+empty inputs, and zero-information preservation. It passed with AddressSanitizer,
+UndefinedBehaviorSanitizer, and leak detection with one and two OpenMP threads.
+Existing mutual-information, entropy, redundancy, and preservation fixture tests
+also passed individually. The binding source passed an Intel compiler syntax-only
+check with OpenMP.
+Full CMake/CTest verification in an approved allocation remains pending.
 
 ## 8. Repair selection boundaries and output guarantees
 

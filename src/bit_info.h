@@ -775,7 +775,6 @@ static int bit_pair_count_calls = 0;
 static int n_exponent_bits_float = 8;
 static int n_exponent_bits_double = 11;
 static constexpr int n_joint_counts = 4;
-static int n_counts = 2;
 
 // Per-bit work is bounded by the larger of the native and fixed-point widths,
 // independent of the input length (including 63-bit fixed-point float inputs).
@@ -783,13 +782,24 @@ template <typename T, typename Value, size_t CountsPerBit = 1>
 using bit_metric_buffer = std::array<Value,
     CountsPerBit * std::max(sizeof(T), sizeof(int64_t)) * CHAR_BIT>;
 
+namespace real_info_detail {
+
+template <typename T>
+void require_analysis_input(const T *input, size_t n_elem) {
+    if (input == nullptr || n_elem == 0) {
+        throw fixed_point_error("Information analysis requires a nonempty array.");
+    }
+}
+
+} // namespace real_info_detail
+
 /**
  * @brief Counts the number of bits set to 1 in a specific bit position across an array using the `bits` class.
  * @param RI_params Real information parameters.
  * @param A Input array of type `T`.
  * @param n_elem Number of elements in the array.
  * @param i Bit position to count (0 for least significant bit).
- * @return The count of bits set to 1 in the specified bit position across the array.
+ * @return The count of bits set to 1; zero if no samples remain after masking.
  */
 template <typename T>
 size_t bit_count_bits(const real_info_params<T> &RI_params, T *A, size_t n_elem, int i, size_t *non_zero) {
@@ -815,8 +825,6 @@ size_t bit_count_bits(const real_info_params<T> &RI_params, T *A, size_t n_elem,
 		}
 		(*non_zero)++;
 	}
-	assert(*non_zero > 0);
-
 	return count;
 }
 
@@ -853,6 +861,41 @@ double entropy(double *A, size_t n_elem) {
 
 	return H;
 }
+
+namespace real_info_detail {
+
+struct paired_bit_information {
+    double mutual = 0;
+    double entropy_a = 0;
+    double entropy_b = 0;
+};
+
+// Derive every paired metric from the same retained rows (00, 01, 10, 11).
+// No retained rows means zero measured information, without dividing by zero.
+inline paired_bit_information information_from_joint_counts(const size_t *counts, size_t n_samples) {
+    paired_bit_information result;
+    if (n_samples == 0) return result;
+
+    const double n = static_cast<double>(n_samples);
+    double pa[2] = {static_cast<double>(counts[0] + counts[1]) / n,
+                    static_cast<double>(counts[2] + counts[3]) / n};
+    double pb[2] = {static_cast<double>(counts[0] + counts[2]) / n,
+                    static_cast<double>(counts[1] + counts[3]) / n};
+    result.entropy_a = entropy(pa, 2);
+    result.entropy_b = entropy(pb, 2);
+    for (int a = 0; a < 2; ++a) {
+        for (int b = 0; b < 2; ++b) {
+            if (counts[2 * a + b] == 0) continue;
+            const double p = static_cast<double>(counts[2 * a + b]) / n;
+            result.mutual += p * std::log2(p / (pa[a] * pb[b]));
+        }
+    }
+    // Roundoff in the sum must not turn an independent bit into negative information.
+    result.mutual = std::max(0.0, result.mutual);
+    return result;
+}
+
+} // namespace real_info_detail
 
 /** 
  * @brief Computes the entropy of a bit pattern distribution.
@@ -931,6 +974,7 @@ void bit_pair_count_bits(const real_info_params<T> &RI_params, const bits<T> &a,
  * @param B Pointer to the second array.
  * @param n_elem The number of elements in the arrays A and B.
  * @param pair_counts Pointer to an array to store the counts of each bit pair.
+ * Counts are overwritten. With masking enabled, skip only pairs with both values masked.
  */
 template <typename T>
 void bit_pair_count_bits(const real_info_params<T> &RI_params, T *A, T *B, size_t n_elem, size_t *pair_counts, size_t *non_zero) {
@@ -939,8 +983,10 @@ void bit_pair_count_bits(const real_info_params<T> &RI_params, T *A, T *B, size_
 	int start_bit, end_bit;
 	get_start_end_bits<T>(RI_params, n_bits, &start_bit, &end_bit);
 	int total_bits = end_bit - start_bit;
+	std::fill_n(pair_counts, total_bits * n_joint_counts, size_t{0});
 	*non_zero = 0;
-	#pragma omp parallel for reduction(+:pair_counts[:total_bits * n_joint_counts])
+	size_t n_non_zero = 0;
+	#pragma omp parallel for reduction(+:pair_counts[:total_bits * n_joint_counts], n_non_zero)
 	for (size_t i = 0; i < n_elem; i++) {
 		if (RI_params.mask_zero && std::abs(A[i]) < EPS && std::abs(B[i]) < EPS) {
 			continue;
@@ -955,10 +1001,9 @@ void bit_pair_count_bits(const real_info_params<T> &RI_params, T *A, T *B, size_
 			pair_counts[(j - start_bit) * n_joint_counts + 2] += pair_count[2];
 			pair_counts[(j - start_bit) * n_joint_counts + 3] += pair_count[3];
 		}
-		//XXX: change this to a reduction of some sort
-		#pragma omp critical 
-		(*non_zero)++;
+		++n_non_zero;
 	}
+	*non_zero = n_non_zero;
 }
 
 /**
@@ -968,19 +1013,23 @@ void bit_pair_count_bits(const real_info_params<T> &RI_params, T *A, T *B, size_
  * @param A Pointer to the array of numeric values.
  * @param n_elem The number of elements in the array A.
  * @param H Pointer to an array to store the entropy of each bit position.
+ * Nonempty arrays with every value masked have zero entropy at every bit.
  */
 template <typename T>
 void bit_count_entropy(const real_info_params<T> &RI_params, T *A, size_t n_elem, double *H) {
+	real_info_detail::require_analysis_input(A, n_elem);
 	const int n_bits = sizeof(A[0]) * CHAR_BIT;
 	int start_bit, end_bit;
 	get_start_end_bits<T>(RI_params, n_bits, &start_bit, &end_bit);
 	bit_metric_buffer<T, size_t> c{};
 	size_t n_non_zero;
 	bit_count_bits(RI_params, A, n_elem, c.data(), &n_non_zero); // bits class implementation
-	assert(n_non_zero > 0);
+	if (n_non_zero == 0) {
+		std::fill_n(H, end_bit - start_bit, 0.0);
+		return;
+	}
 
 	for (int i = start_bit; i < end_bit; i++) {
-		//double p = static_cast<double>(c[i - start_bit])/static_cast<double>(n_elem);
 		double p = static_cast<double>(c[i - start_bit])/static_cast<double>(n_non_zero);
 		double p_array[2] = {p, 1 - p};
 		H[i - start_bit] = entropy(p_array, 2);
@@ -996,9 +1045,12 @@ void bit_count_entropy(const real_info_params<T> &RI_params, T *A, size_t n_elem
  * @param n_elem The number of elements in the input arrays.
  * @param info Pointer to an array to store the mutual information for each bit position.
  * @param RI_params Real information parameters.
+ * Nonempty arrays with no eligible pairs have zero mutual information at every bit.
  */
 template <typename T>
 void mutual_information(const real_info_params<T> &RI_params, T *A, T *B, size_t n_elem, double *info) {
+	real_info_detail::require_analysis_input(A, n_elem);
+	real_info_detail::require_analysis_input(B, n_elem);
 	const int n_bits = sizeof(A[0]) * CHAR_BIT;
 	int start_bit, end_bit;
 	get_start_end_bits<T>(RI_params, n_bits, &start_bit, &end_bit);
@@ -1007,23 +1059,9 @@ void mutual_information(const real_info_params<T> &RI_params, T *A, T *B, size_t
 	bit_metric_buffer<T, size_t, n_joint_counts> pair_counts{};
 	size_t n_non_zero;
 	bit_pair_count_bits(RI_params, A, B, n_elem, pair_counts.data(), &n_non_zero); // bits class implementation
-	assert(n_non_zero > 0);
-
 	for (int i = 0; i < total_bits; i++) {
-		info[i] = 0;
-		for (int r = 0; r < 2; r++) {
-			//double p_r = static_cast<double>(pair_counts[i * n_joint_counts + r * n_counts] + pair_counts[i * n_joint_counts + r * n_counts + 1]) / static_cast<double>(n_elem);
-			double p_r = static_cast<double>(pair_counts[i * n_joint_counts + r * n_counts] + pair_counts[i * n_joint_counts + r * n_counts + 1]) / static_cast<double>(n_non_zero);
-			for (int s = 0; s < 2; s++) {
-				//double p_s = static_cast<double>(pair_counts[i * n_joint_counts + s] + pair_counts[i * n_joint_counts + n_counts + s]) / static_cast<double>(n_elem);
-				double p_s = static_cast<double>(pair_counts[i * n_joint_counts + s] + pair_counts[i * n_joint_counts + n_counts + s]) / static_cast<double>(n_non_zero);
-				if (pair_counts[i * n_joint_counts + r * n_counts + s] > 0) {
-					//double p_rs = static_cast<double>(pair_counts[i * n_joint_counts + r * n_counts + s]) / static_cast<double>(n_elem);
-					double p_rs = static_cast<double>(pair_counts[i * n_joint_counts + r * n_counts + s]) / static_cast<double>(n_non_zero);
-					info[i] += p_rs * std::log2(p_rs/(p_r * p_s));
-				}
-			}
-		}
+		info[i] = real_info_detail::information_from_joint_counts(
+			pair_counts.data() + i * n_joint_counts, n_non_zero).mutual;
 	}
 }
 
@@ -1041,6 +1079,13 @@ void mutual_information(const real_info_params<T> &RI_params, T *A, T *B, size_t
  */
 template <typename T>
 void bitwise_real_information(const real_info_params<T> &RI_params, T *A, size_t n_elem, double *info) {
+	real_info_detail::require_analysis_input(A, n_elem);
+	if (n_elem == 1) {
+		int start_bit, end_bit;
+		get_start_end_bits<T>(RI_params, sizeof(T) * CHAR_BIT, &start_bit, &end_bit);
+		std::fill_n(info, end_bit - start_bit, 0.0);
+		return;
+	}
 	T *B = A + 1;
 	mutual_information(RI_params, A, B, n_elem - 1, info);
 }
@@ -1054,26 +1099,31 @@ void bitwise_real_information(const real_info_params<T> &RI_params, T *A, size_t
  * @param B Pointer to first array 
  * @param n_elem Number of elements in each array 
  * @param R Pointer to array to store redundancy for each bit position 
+ * No eligible pairs gives zero redundancy. Constant bits give one only if equal.
  */
 template <typename T>
 void redundancy(const real_info_params<T> &RI_params, T *A, T *B, size_t n_elem, double *R) {
+	real_info_detail::require_analysis_input(A, n_elem);
+	real_info_detail::require_analysis_input(B, n_elem);
 	const int n_bits = sizeof(A[0]) * CHAR_BIT;
 	int start_bit, end_bit;
 	get_start_end_bits<T>(RI_params, n_bits, &start_bit, &end_bit);
 	int total_bits = end_bit - start_bit;
-	bit_metric_buffer<T, double> M{};
-	bit_metric_buffer<T, double> HA{};
-	bit_metric_buffer<T, double> HB{};
-
-	mutual_information(RI_params, A, B, n_elem, M.data());
-	bit_count_entropy(RI_params, A, n_elem, HA.data());
-	bit_count_entropy(RI_params, B, n_elem, HB.data());
+	bit_metric_buffer<T, size_t, n_joint_counts> pair_counts{};
+	size_t n_non_zero;
+	bit_pair_count_bits(RI_params, A, B, n_elem, pair_counts.data(), &n_non_zero);
 
 	for (int i = 0; i < total_bits; i++) {
-		if (HA[i] + HB[i] > 0) {
-			R[i] = 2*M[i]/(HA[i] + HB[i]);
-		} else if (M[i] == HA[i] == HB[i] == 0) {
-			R[i] = 1;  // The exponent bits are often identical between all elements, which mathematically works out to a redundancy of 1
+		R[i] = 0.0;
+		if (n_non_zero == 0) continue;
+		const size_t *counts = pair_counts.data() + i * n_joint_counts;
+		const auto metrics = real_info_detail::information_from_joint_counts(counts, n_non_zero);
+		if (metrics.entropy_a + metrics.entropy_b > 0) {
+			// The mathematical bounds are [0, 1]; clamp floating-point roundoff.
+			R[i] = std::clamp(2 * metrics.mutual / (metrics.entropy_a + metrics.entropy_b), 0.0, 1.0);
+		} else if (metrics.mutual == 0 && metrics.entropy_a == 0 && metrics.entropy_b == 0) {
+			// Both bits are constant: equal constants are lossless, different ones are not.
+			R[i] = counts[0] + counts[3] == n_non_zero ? 1.0 : 0.0;
 		}
 	}
 
@@ -1118,8 +1168,9 @@ double preserved_information_template(const real_info_params<T> &RI_params, T *A
 		total_information += I[i];
 	}
 
-    if (total_information == 0) {
-		return 0.0; 
+	if (total_information == 0) {
+		// Extend the constant-reference convention to any zero-information input.
+		return std::memcmp(A, B, n_elem * sizeof(T)) == 0 ? 1.0 : 0.0;
 	}
 	P /= total_information;
 	return P;
