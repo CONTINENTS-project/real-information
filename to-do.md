@@ -145,19 +145,34 @@ still pending.
   check. Full CMake/CTest verification in an approved allocation is still pending;
   the two deferred sub-tasks above remain to-do until all verification is complete.
 
-## 5. Remove leaks and input-sized stack allocations
+## 5. Remove leaks and input-sized stack allocations — implemented
 
 Relevant source: `redundancy`, `preserved_information_template`, and the selection
 functions in [src/bit_info.h](src/bit_info.h).
 
-Redundancy and preservation calculations leak their allocated arrays. Linear
-selection also leaks its scratch array on successful early returns. Recursive
-binary search allocates two input-sized variable-length arrays per call; these
-arrays also conflict with the project's standard C++20 configuration.
+The original implementation leaked redundancy/preservation buffers and the linear
+selector's scratch array on successful early returns. Recursive binary search
+allocated two input-sized variable-length arrays per call.
 
-- [ ] Replace manual allocations with owned, reusable buffers.
-- [ ] Release resources on every return path.
-- [ ] Replace recursive binary search with an iterative implementation.
+- [x] Replace manual allocations with owned buffers. Per-bit metric/count buffers
+  are fixed-size `std::array` objects with capacity for both native and 63-bit
+  fixed-point representations. Input-sized selector/sort scratch uses
+  `std::vector`; no variable-length arrays remain in the core header.
+- [x] Release resources automatically on every return and exception path.
+- [x] Replace recursive binary search with an iterative implementation, allocating
+  its two candidate buffers once and reusing them throughout the search.
+
+Added [tests/test_selection_buffers.cpp](tests/test_selection_buffers.cpp) for
+float/double, native/fixed-point selections, fresh/resumed searches, repeated
+calls, early returns, and exceptions after scratch allocation. It passed with
+AddressSanitizer and leak detection. Existing `test_redundancy` and
+`test_preserved_information` passed, and a separate 36-case comparison matched
+the pre-change selector counts and preservation values exactly. The binding
+source passed a syntax-only compile with `-Werror=vla`.
+
+Search decisions, tolerance comparisons, and boundary/output behavior are
+preserved; the correctness repairs in step 8 remain to-do. These focused checks
+do not replace full CMake/CTest verification in an approved allocation.
 
 ## 6. Correct rounding and half-shaving
 

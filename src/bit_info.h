@@ -2,6 +2,7 @@
 #define BIT_INFO_H
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <concepts>
 #include <climits>
@@ -798,8 +799,14 @@ struct HELP {
 
 static int n_exponent_bits_float = 8;
 static int n_exponent_bits_double = 11;
-static int n_joint_counts = 4;
+static constexpr int n_joint_counts = 4;
 static int n_counts = 2;
+
+// Per-bit work is bounded by the larger of the native and fixed-point widths,
+// independent of the input length (including 63-bit fixed-point float inputs).
+template <typename T, typename Value, size_t CountsPerBit = 1>
+using bit_metric_buffer = std::array<Value,
+    CountsPerBit * std::max(sizeof(T), sizeof(int64_t)) * CHAR_BIT>;
 
 /** 
  *  @brief Gets the number of exponent bits for a given bit size following IEEE 754 standard.
@@ -934,9 +941,8 @@ double bitpattern_entropy(T *A, size_t n_elem) {
   double H = 0;
   size_t count = 1;
 
-  T *A_sorted = new T[n_elem];
-  std::memcpy(A_sorted, A, n_elem * sizeof(T));
-  std::sort(A_sorted, A_sorted + n_elem);
+  std::vector<T> A_sorted(A, A + n_elem);
+  std::sort(A_sorted.begin(), A_sorted.end());
   for (size_t i = 0; i < n_elem-1; i++) {
     if (A_sorted[i+1] == A_sorted[i]) {
       count += 1;
@@ -949,7 +955,6 @@ double bitpattern_entropy(T *A, size_t n_elem) {
 
   p = static_cast<double>(count)/static_cast<double>(n_elem);
   H += -p * std::log2(p);
-  delete[] A_sorted;
   return H;
 }
 
@@ -1105,11 +1110,10 @@ void bit_count_entropy(const real_info_params<T> &RI_params, T *A, size_t n_elem
 	const int n_bits = sizeof(A[0]) * CHAR_BIT;
 	int start_bit, end_bit;
 	get_start_end_bits<T>(RI_params, n_bits, &start_bit, &end_bit);
-	int total_bits = end_bit - start_bit;
-	size_t c[total_bits];
+	bit_metric_buffer<T, size_t> c{};
 	size_t n_non_zero;
 	//bit_count(A, n_elem, c);
-	bit_count_bits(RI_params, A, n_elem, c, &n_non_zero); // bits class implementation
+	bit_count_bits(RI_params, A, n_elem, c.data(), &n_non_zero); // bits class implementation
 	assert(n_non_zero > 0);
 
 	for (int i = start_bit; i < end_bit; i++) {
@@ -1315,11 +1319,10 @@ void mutual_information(const real_info_params<T> &RI_params, T *A, T *B, size_t
 	get_start_end_bits<T>(RI_params, n_bits, &start_bit, &end_bit);
 	int total_bits = end_bit - start_bit;
 
-	size_t pair_counts[n_joint_counts * total_bits];
-	for (size_t i = 0; i < n_joint_counts * total_bits; i++) pair_counts[i] = 0;
+	bit_metric_buffer<T, size_t, n_joint_counts> pair_counts{};
 	size_t n_non_zero;
 	//bit_pair_count(A, B, n_elem, pair_counts, &n_non_zero);
-	bit_pair_count_bits(RI_params, A, B, n_elem, pair_counts, &n_non_zero); // bits class implementation
+	bit_pair_count_bits(RI_params, A, B, n_elem, pair_counts.data(), &n_non_zero); // bits class implementation
 	assert(n_non_zero > 0);
 
 	for (int i = 0; i < total_bits; i++) {
@@ -1374,13 +1377,13 @@ void redundancy(const real_info_params<T> &RI_params, T *A, T *B, size_t n_elem,
 	int start_bit, end_bit;
 	get_start_end_bits<T>(RI_params, n_bits, &start_bit, &end_bit);
 	int total_bits = end_bit - start_bit;
-	double *M = new double[total_bits];
-	double *HA = new double[total_bits];
-	double *HB = new double[total_bits];
+	bit_metric_buffer<T, double> M{};
+	bit_metric_buffer<T, double> HA{};
+	bit_metric_buffer<T, double> HB{};
 
-	mutual_information(RI_params, A, B, n_elem, M);
-	bit_count_entropy(RI_params, A, n_elem, HA);
-	bit_count_entropy(RI_params, B, n_elem, HB);
+	mutual_information(RI_params, A, B, n_elem, M.data());
+	bit_count_entropy(RI_params, A, n_elem, HA.data());
+	bit_count_entropy(RI_params, B, n_elem, HB.data());
 
 	for (int i = 0; i < total_bits; i++) {
 		if (HA[i] + HB[i] > 0) {
@@ -1418,31 +1421,11 @@ double preserved_information_template(const real_info_params<T> &RI_params, T *A
 	int start_bit, end_bit;
 	get_start_end_bits<T>(float_params, n_bits, &start_bit, &end_bit);
 	int total_bits = end_bit - start_bit;
-	double *R = new double[total_bits];
-	double *I = new double[total_bits];
+	bit_metric_buffer<T, double> R{};
+	bit_metric_buffer<T, double> I{};
 
-//	if (RI_params.fixed_point) {
-//		T *A_fl = new T[n_elem];
-//		T *B_fl = new T[n_elem];
-//		for (size_t i = 0; i < n_elem; i++) {
-//			FP<T> diff_fp = A[i];
-//			diff_fp.value = A[i].value - B[i].value;
-//			T diff = diff_fp.convert_back();
-//			A_fl[i] = A[i].convert_back();
-//			B_fl[i] = A_fl[i] - diff;
-//		}
-//
-//	    redundancy(RI_params, A_fl, B_fl, n_elem, R);
-//	    bitwise_real_information(RI_params, A_fl, n_elem, I);
-//		delete [] A_fl;
-//		delete [] B_fl;
-//	} else {
-//		redundancy(RI_params, A, B, n_elem, R);
-//		bitwise_real_information(RI_params, A, n_elem, I);
-//    }
-
-	redundancy(float_params, A, B, n_elem, R);
-	bitwise_real_information(float_params, A, n_elem, I);
+	redundancy(float_params, A, B, n_elem, R.data());
+	bitwise_real_information(float_params, A, n_elem, I.data());
 
 	double P = 0;
 	double total_information = 0;
@@ -1473,7 +1456,8 @@ template <typename T>
 int pick_bits_to_shave_template(const real_info_params<T> &RI_params, T *A, size_t n_elem, double tolerance, int nbits_old) {
   if (is_constant_array(A, n_elem)) return 0;
   int max_bits = sizeof(T) * CHAR_BIT; 
-  T *s = new T[n_elem];
+  std::vector<T> scratch(n_elem);
+  T *s = scratch.data();
   int start_bit;
   if (RI_params.fixed_point) {
 	max_bits = sizeof(int64_t) * CHAR_BIT;
@@ -1523,8 +1507,6 @@ int pick_bits_to_shave_template(const real_info_params<T> &RI_params, T *A, size
 
   }
 
-  delete[] s;
-
   return 0;
 }
 
@@ -1564,41 +1546,39 @@ int get_max_shave_bits(const real_info_params<T> &RI_params) {
  */
 template <typename T>
 void binary_search(const real_info_params<T> &RI_params, T *A, size_t n_elem, double tolerance, int &start_bit, int high_bit, int low_bit, T *shaved) {
-	T s_high[n_elem];
-	T s_low[n_elem];
-    //shave_template<T>(A, n_elem, start_bit, s_high);
-    //shave_template<T>(A, n_elem, start_bit-1, s_low);
-	shave_bits<T>(RI_params, A, n_elem, start_bit, s_high);  // bits class implementation
-	shave_bits<T>(RI_params, A, n_elem, start_bit-1, s_low); // bits class implementation
-    //bit_rounding_template<T>(A, n_elem, start_bit, s_high);
-    //bit_rounding_template<T>(A, n_elem, start_bit-1, s_low);
-   	auto info_high = preserved_information_template<T>(RI_params, A, s_high, n_elem);
-   	auto info_low = preserved_information_template<T>(RI_params, A, s_low, n_elem);
-	// Note: info_low is always >= info_high since we are shaving fewer bits
-   	if (info_high < tolerance && info_low >= tolerance) {
-		memcpy(shaved, s_low, n_elem * sizeof(T));
-		start_bit = start_bit - 1;
-		return;
-   	} else if (info_low < tolerance) {
-		high_bit = start_bit;
-		start_bit = (start_bit - low_bit)/2 + low_bit;
-		if (start_bit == 0) {
-			memcpy(shaved, s_low, n_elem * sizeof(T));
-			return;
-		}
-		binary_search<T>(RI_params, A, n_elem, tolerance, start_bit, high_bit, low_bit, shaved);
-	} else if (info_high >= tolerance) {
-		low_bit = start_bit;
-		start_bit = (high_bit - start_bit)/2 + start_bit;
-		if (start_bit == low_bit) {
-			memcpy(shaved, s_high, n_elem * sizeof(T));
-			return;
-		}
-		binary_search<T>(RI_params, A, n_elem, tolerance, start_bit, high_bit, low_bit, shaved);
-	} else {
-		std::cout << "binary search error start bit " << start_bit << " old bits shaved " << start_bit << " info high " << info_high << " info low " << info_low << " tolerance " << tolerance << "\n";
-		return;
-	}
+    // Allocate once per search and reuse both candidates as the bounds narrow.
+    std::vector<T> s_high(n_elem);
+    std::vector<T> s_low(n_elem);
+    for (;;) {
+        shave_bits<T>(RI_params, A, n_elem, start_bit, s_high.data());
+        shave_bits<T>(RI_params, A, n_elem, start_bit - 1, s_low.data());
+        const auto info_high = preserved_information_template<T>(RI_params, A, s_high.data(), n_elem);
+        const auto info_low = preserved_information_template<T>(RI_params, A, s_low.data(), n_elem);
+        // Preserve the existing decisions and output behavior; boundary repairs
+        // and the monotonicity requirement are tracked separately in step 8.
+        if (info_high < tolerance && info_low >= tolerance) {
+            std::copy(s_low.begin(), s_low.end(), shaved);
+            --start_bit;
+            return;
+        } else if (info_low < tolerance) {
+            high_bit = start_bit;
+            start_bit = (start_bit - low_bit) / 2 + low_bit;
+            if (start_bit == 0) {
+                std::copy(s_low.begin(), s_low.end(), shaved);
+                return;
+            }
+        } else if (info_high >= tolerance) {
+            low_bit = start_bit;
+            start_bit = (high_bit - start_bit) / 2 + start_bit;
+            if (start_bit == low_bit) {
+                std::copy(s_high.begin(), s_high.end(), shaved);
+                return;
+            }
+        } else {
+            std::cout << "binary search error start bit " << start_bit << " old bits shaved " << start_bit << " info high " << info_high << " info low " << info_low << " tolerance " << tolerance << "\n";
+            return;
+        }
+    }
 }
 
 /**
