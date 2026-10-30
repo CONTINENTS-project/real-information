@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <charconv>
 #include <concepts>
 #include <climits>
@@ -526,163 +527,173 @@ void get_start_end_bits(const real_info_params<T> &params, int n_bits, int *star
 	*start = 0;
 }
 
-template<typename T>
+namespace real_info_detail {
+
+enum class bit_operation { shave, set, halfshave, round };
+
+template <typename T>
+using native_word = std::conditional_t<std::is_same_v<T, float>, uint32_t, uint64_t>;
+
+template <typename T>
+void validate_bit_count(int n, bool fixed_point = false) {
+    static_assert(std::is_same_v<T, float> || std::is_same_v<T, double>);
+    const int maximum = fixed_point ? 63 : std::numeric_limits<T>::digits - 1;
+    if (n < 0 || n > maximum) {
+        throw fixed_point_error("Bit count must be between 0 and " + std::to_string(maximum));
+    }
+}
+
+// Shared unsigned implementation; callers restrict native operations to the
+// mantissa and fixed-point operations to the 63 nonnegative code bits.
+template <std::unsigned_integral UInt>
+UInt transform_word(UInt value, int n, bit_operation operation) {
+    if (n < 0 || n >= std::numeric_limits<UInt>::digits) {
+        throw fixed_point_error("Bit count is outside the unsigned word width");
+    }
+    if (n == 0) return value;
+    const UInt step = UInt{1} << n;
+    const UInt mask = step - UInt{1};
+    const UInt cleared = value & ~mask;
+    switch (operation) {
+        case bit_operation::shave:
+            return cleared;
+        case bit_operation::set:
+            return value | mask;
+        case bit_operation::halfshave:
+            return cleared | (UInt{1} << (n - 1));
+        case bit_operation::round: {
+            const UInt discarded = value & mask;
+            const UInt halfway = step >> 1;
+            // At a tie, the least-significant RETAINED bit decides parity.
+            const bool increment = discarded > halfway ||
+                (discarded == halfway && ((value >> n) & UInt{1}) != 0);
+            if (!increment) return cleared;
+            if (cleared > std::numeric_limits<UInt>::max() - step) {
+                throw fixed_point_error("Rounded unsigned word would overflow");
+            }
+            return cleared + step;
+        }
+    }
+    throw fixed_point_error("Unknown bit operation");
+}
+
+template <typename T>
+native_word<T> transform_native(native_word<T> value, int n, bit_operation operation) {
+    validate_bit_count<T>(n);
+    using UInt = native_word<T>;
+    constexpr int fraction_bits = std::numeric_limits<T>::digits - 1;
+    constexpr UInt fraction_mask = (UInt{1} << fraction_bits) - UInt{1};
+    constexpr UInt exponent_mask = (std::numeric_limits<UInt>::max() >> 1) & ~fraction_mask;
+    // Preserve infinities and NaN payloads without floating-point arithmetic,
+    // including signaling NaNs. Rounding finite values may overflow to infinity.
+    if ((value & exponent_mask) == exponent_mask) return value;
+    return transform_word(value, n, operation);
+}
+
+template <typename T>
+bool copy_unmodified(const real_info_params<T> &params, const T *input,
+                     size_t n_elem, int n, T *output) {
+    validate_bit_count<T>(n, params.fixed_point);
+    if (n_elem == 0) return true;
+    if (input == nullptr || output == nullptr) {
+        throw fixed_point_error("Bit operations require valid input and output arrays");
+    }
+    if (copy_constant_fixed_point(params, input, n_elem, output)) return true;
+    if (n != 0) return false;
+    if (params.fixed_point) {
+        for (size_t i = 0; i < n_elem; ++i) {
+            // Validate the input range, but avoid an encode/decode round trip.
+            const FP<T> checked(params.fixed_range, input[i]);
+            (void)checked;
+        }
+    }
+    if (input != output) std::memmove(output, input, n_elem * sizeof(T));
+    return true;
+}
+
+template <typename T>
+void transform_native_array(T *input, size_t n_elem, int n, T *output,
+                            bit_operation operation, bool alternate_shave = false) {
+    validate_bit_count<T>(n);
+    if (n_elem == 0) return;
+    if (input == nullptr || output == nullptr) {
+        throw fixed_point_error("Bit operations require valid input and output arrays");
+    }
+    if (n == 0) {
+        if (input != output) std::memmove(output, input, n_elem * sizeof(T));
+        return;
+    }
+    for (size_t i = 0; i < n_elem; ++i) {
+        const auto word = std::bit_cast<native_word<T>>(input[i]);
+        const auto selected = alternate_shave && i % 2 != 0 ? bit_operation::shave : operation;
+        output[i] = std::bit_cast<T>(transform_native<T>(word, n, selected));
+    }
+}
+
+template <size_t nbits>
+void transform_bitset(std::bitset<nbits> *value, int n, bit_operation operation) {
+    static_assert(nbits == 32 || nbits == 64, "Native bitset operations require 32 or 64 bits");
+    using T = std::conditional_t<nbits == 32, float, double>;
+    if (value == nullptr) throw fixed_point_error("Bit operation requires a valid bitset");
+    const auto word = static_cast<native_word<T>>(value->to_ullong());
+    *value = std::bitset<nbits>(transform_native<T>(word, n, operation));
+}
+
+} // namespace real_info_detail
+
 /**
- * @brief Utility wrapper for bit-level operations on floating-point values.
- *
- * The class stores the raw IEEE-754 bit pattern of a float or double and
- * exposes helpers to shave, set, halfshave, and round least-significant bits.
- *
- * @tparam T Floating-point type (`float` or `double`).
+ * @brief Unsigned native/fixed-point storage with shared low-bit operations.
+ * Native counts are limited to the mantissa; fixed-point counts to 63 bits.
  */
-class bits{
-	private:
-		const real_info_params<T> &params_;
+template <typename T>
+class bits {
+    static_assert(std::is_same_v<T, float> || std::is_same_v<T, double>);
+    const real_info_params<T> &params_;
 
-	public:
-		uint32_t bit_set_32;
-		uint64_t bit_set_64;
+    void apply(int n, real_info_detail::bit_operation operation) {
+        real_info_detail::validate_bit_count<T>(n, params_.fixed_point);
+        if (n == 0 || (params_.fixed_point && params_.fixed_range.constant)) return;
+        if (params_.fixed_point) {
+            const auto maximum = static_cast<uint64_t>(FP<T>::max_code);
+            if (bit_set_64 > maximum) throw fixed_point_error("Fixed-point code is outside the initialized mapping");
+            // Setting, half-shaving, or rounding near the upper endpoint can
+            // exceed Q. Saturate in unsigned arithmetic before decoding.
+            bit_set_64 = std::min(real_info_detail::transform_word(bit_set_64, n, operation), maximum);
+        } else if constexpr (std::is_same_v<T, float>) {
+            bit_set_32 = real_info_detail::transform_native<T>(bit_set_32, n, operation);
+        } else {
+            bit_set_64 = real_info_detail::transform_native<T>(bit_set_64, n, operation);
+        }
+    }
 
-		/**
-		 * @brief Construct from a floating-point value by copying its bit pattern.
-		 * @param RI_params Real information parameters.
-		 * @param x Input value.
-		 */
-		bits(const real_info_params<T> &params, T x) : params_(params) {
-			if (params_.fixed_point) {
-				FP<T> x_fp(params_.fixed_range, x);
-				std::memcpy(&bit_set_64, &x_fp.value, sizeof(int64_t));
-			} else if (std::is_same_v<T, float>) {
-				std::memcpy(&bit_set_32, &x, sizeof(float));
-			} else if (std::is_same_v<T, double>) {
-				std::memcpy(&bit_set_64, &x, sizeof(double));
-			}
-		}
+public:
+    uint32_t bit_set_32 = 0;
+    uint64_t bit_set_64 = 0;
 
-		/**
-		 * @brief Reconstruct the floating-point value from the stored bits.
-		 * @return Value of type `T` represented by the current bit pattern.
-		 */
-		T convert_back() {
-			T result;
-			if (params_.fixed_point) {
-				FP<T> temp(params_.fixed_range);
-				std::memcpy(&temp.value, &bit_set_64, sizeof(int64_t));
-				result = temp.convert_back();
-			} else if (std::is_same_v<T, float>) {
-				std::memcpy(&result, &bit_set_32, sizeof(float));
-			} else if (std::is_same_v<T, double>) {
-				std::memcpy(&result, &bit_set_64, sizeof(double));
-			}
-			return result;
-		}
+    bits(const real_info_params<T> &params, T value) : params_(params) {
+        if (params_.fixed_point) {
+            bit_set_64 = static_cast<uint64_t>(FP<T>(params_.fixed_range, value).value);
+        } else if constexpr (std::is_same_v<T, float>) {
+            bit_set_32 = std::bit_cast<uint32_t>(value);
+        } else {
+            bit_set_64 = std::bit_cast<uint64_t>(value);
+        }
+    }
 
-		/**
-		 * @brief Shave the lowest `n` bits.
-		 * @param n Number of least-significant bits to shave.
-		 */
-		void shave(int n) {
-			if (params_.fixed_point && params_.fixed_range.constant) return;
-			if (params_.fixed_point) {
-				uint64_t mask = 0xFFFFFFFFFFFFFFFF << n;
-				bit_set_64 &= mask;
-		    } else if (std::is_same_v<T, float>) {
-				uint32_t mask = 0xFFFFFFFF << n;
-				bit_set_32 &= mask;
-			} else if (std::is_same_v<T, double>) {
-				uint64_t mask = 0xFFFFFFFFFFFFFFFF << n;
-				bit_set_64 &= mask;
-			}
-		}
+    T convert_back() {
+        if (params_.fixed_point) {
+            FP<T> value(params_.fixed_range);
+            value.value = std::bit_cast<int64_t>(bit_set_64);
+            return value.convert_back();
+        }
+        if constexpr (std::is_same_v<T, float>) return std::bit_cast<T>(bit_set_32);
+        else return std::bit_cast<T>(bit_set_64);
+    }
 
-		/**
-		 * @brief Set the lowest `n` bits to 1.
-		 * @param n Number of least-significant bits to set.
-		 */
-		void set(int n) {
-			if (params_.fixed_point && params_.fixed_range.constant) return;
-			if (params_.fixed_point) {
-				uint64_t mask = 0xFFFFFFFFFFFFFFFF << n;
-				bit_set_64 |= ~mask;
-		    } else if (std::is_same_v<T, float>) {
-				uint32_t mask = 0xFFFFFFFF << n;
-				bit_set_32 |= ~mask;
-			} else if (std::is_same_v<T, double>) {
-				uint64_t mask = 0xFFFFFFFFFFFFFFFF << n;
-				bit_set_64 |= ~mask;
-			}
-		}
-
-		/**
-		 * @brief Shave the lowest `n` bits and set the highest cleared bit.
-		 * @param n Number of least-significant bits to modify.
-		 */
-		void halfshave(int n) {
-			if (params_.fixed_point && params_.fixed_range.constant) return;
-			int nbits = sizeof(T) * CHAR_BIT;
-			if (params_.fixed_point) {
-				uint64_t keep_mask = 0xFFFFFFFFFFFFFFFF << n;
-				bit_set_64 &= keep_mask;
-				uint64_t round_up_mask = 0x8000000000000000 >> (nbits - n - 1);
-				bit_set_64 |= round_up_mask;
-		    } else if (std::is_same_v<T, float>) {
-				uint32_t keep_mask = 0xFFFFFFFF << n;
-				bit_set_32 &= keep_mask;
-				uint32_t round_up_mask = 0x80000000 >> (nbits - n - 1);
-				bit_set_32 |= round_up_mask;
-			} else if (std::is_same_v<T, double>) {
-				uint64_t keep_mask = 0xFFFFFFFFFFFFFFFF << n;
-				bit_set_64 &= keep_mask;
-				uint64_t round_up_mask = 0x8000000000000000 >> (nbits - n - 1);
-				bit_set_64 |= round_up_mask;
-			}
-		}
-
-		/**
-		 * @brief Bitwise round the `n` least-significant bits
-		 * @param n Number of least-significant bits to round away.
-		 */
-		void round(int n) {
-			if (params_.fixed_point && params_.fixed_range.constant) return;
-			int nbits = sizeof(T) * CHAR_BIT;
-			int mantissa_bits = nbits - get_n_exponent_bits(nbits) - 1;
-			int keepbits = mantissa_bits - n;
-			int shift = mantissa_bits - keepbits - 1;
-			shift -= (keepbits == mantissa_bits) ? 1 : 0;
-
-			if (params_.fixed_point) {
-				uint64_t upper_mask;
-				if (nbits - n + 1 >= 64) {
-					upper_mask = 0x0000000000000000; // bitshift leads to undefined behaviour if greater than number of bits, and what we really want are all zeros
-				} else {
-				 	upper_mask = 0xFFFFFFFFFFFFFFFF >> (nbits - n + 1);
-				}
-				uint64_t lower_mask = 0xFFFFFFFFFFFFFFFF << n;
-				uint64_t temp_bit_set_64 = bit_set_64 + upper_mask + ((bit_set_64 >> shift) & 1);
-				bit_set_64 = temp_bit_set_64 & lower_mask;
-		    } else if (std::is_same_v<T, float>) {
-				uint32_t upper_mask;
-				if (nbits - n + 1 >= 32) {
-					upper_mask = 0x00000000; // bitshift leads to undefined behaviour if greater than number of bits, and what we really want are all zeros
-				} else {
-				 	upper_mask = 0xffffffff >> (nbits - n + 1);
-				}
-				uint32_t lower_mask = 0xFFFFFFFF << n;
-				uint32_t temp_bit_set_32 = bit_set_32 + upper_mask + ((bit_set_32 >> shift) & 1);
-				bit_set_32 = temp_bit_set_32 & lower_mask;
-			} else if (std::is_same_v<T, double>) {
-				uint64_t upper_mask;
-				if (nbits - n + 1 >= 64) {
-					upper_mask = 0x0000000000000000; // bitshift leads to undefined behaviour if greater than number of bits, and what we really want are all zeros
-				} else {
-				 	upper_mask = 0xFFFFFFFFFFFFFFFF >> (nbits - n + 1);
-				}
-				uint64_t lower_mask = 0xFFFFFFFFFFFFFFFF << n;
-				uint64_t temp_bit_set_64 = bit_set_64 + upper_mask + ((bit_set_64 >> shift) & 1);
-				bit_set_64 = temp_bit_set_64 & lower_mask;
-			}
-		}
-
+    void shave(int n) { apply(n, real_info_detail::bit_operation::shave); }
+    void set(int n) { apply(n, real_info_detail::bit_operation::set); }
+    void halfshave(int n) { apply(n, real_info_detail::bit_operation::halfshave); }
+    void round(int n) { apply(n, real_info_detail::bit_operation::round); }
 };
 
 /** 
@@ -694,7 +705,7 @@ class bits{
  */
 template <typename T>
 void shave_bits(const real_info_params<T> &RI_params, T *A, size_t n_elem, int n, T *shaved) {
-	if (n_elem == 0 || copy_constant_fixed_point(RI_params, A, n_elem, shaved)) return;
+	if (real_info_detail::copy_unmodified(RI_params, A, n_elem, n, shaved)) return;
 	for (size_t i = 0; i < n_elem; i++) {
 		bits<T> b(RI_params, A[i]);
 		uint64_t a;
@@ -726,7 +737,7 @@ void shave_bits(const real_info_params<T> &RI_params, T *A, size_t n_elem, int n
  */
 template <typename T>
 void halfshave_bits(const real_info_params<T> &RI_params, T *A, size_t n_elem, int n, T *halfshaved) {
-	if (n_elem == 0 || copy_constant_fixed_point(RI_params, A, n_elem, halfshaved)) return;
+	if (real_info_detail::copy_unmodified(RI_params, A, n_elem, n, halfshaved)) return;
 	for (size_t i = 0; i < n_elem; i++) {
 		bits<T> b(RI_params, A[i]);
 		b.halfshave(n);
@@ -744,7 +755,7 @@ void halfshave_bits(const real_info_params<T> &RI_params, T *A, size_t n_elem, i
  */
 template <typename T>
 void bit_rounding_bits(const real_info_params<T> &RI_params, T *A, size_t n_elem, int n, T *bit_rounding_result) {
-	if (n_elem == 0 || copy_constant_fixed_point(RI_params, A, n_elem, bit_rounding_result)) return;
+	if (real_info_detail::copy_unmodified(RI_params, A, n_elem, n, bit_rounding_result)) return;
 	for (size_t i = 0; i < n_elem; i++) {
 		bits<T> b(RI_params, A[i]);
 		b.round(n);
@@ -762,7 +773,7 @@ void bit_rounding_bits(const real_info_params<T> &RI_params, T *A, size_t n_elem
  */
 template <typename T>
 void set_bits(const real_info_params<T> &RI_params, T *A, size_t n_elem, int n, T *set) {
-	if (n_elem == 0 || copy_constant_fixed_point(RI_params, A, n_elem, set)) return;
+	if (real_info_detail::copy_unmodified(RI_params, A, n_elem, n, set)) return;
 	for (size_t i = 0; i < n_elem; i++) {
 		bits<T> b(RI_params, A[i]);
 		b.set(n);
@@ -780,7 +791,7 @@ void set_bits(const real_info_params<T> &RI_params, T *A, size_t n_elem, int n, 
  */
 template <typename T>
 void groom_bits(const real_info_params<T> &RI_params, T *A, size_t n_elem, int n, T *groomed) {
-	if (n_elem == 0 || copy_constant_fixed_point(RI_params, A, n_elem, groomed)) return;
+	if (real_info_detail::copy_unmodified(RI_params, A, n_elem, n, groomed)) return;
 	for (size_t i = 0; i < n_elem; i++) {
 		if (i % 2 == 0) {
 			set_bits<T>(RI_params, A + i, 1, n, groomed + i);
@@ -1124,182 +1135,51 @@ void bit_count_entropy(const real_info_params<T> &RI_params, T *A, size_t n_elem
 	}
 }
 
-/** @brief shaves specified number of least significant bits from given bitset
- *
- *  @tparam n size of bitset
- *  @param b pointer to bitset to shave
- *  @param n number of bits to shave
- */
+// Compatibility helpers use the same unsigned kernels as bits<T>; std::bitset
+// objects are converted through their public API, never their object layout.
 template <size_t nbits>
-void shave_bitset(std::bitset<nbits> *b, int n) {
-	std::bitset<nbits> mask = -1;	// all 1's
-	mask <<= n;
-	*b &= mask;
+void shave_bitset(std::bitset<nbits> *value, int n) {
+    real_info_detail::transform_bitset(value, n, real_info_detail::bit_operation::shave);
 }
 
-/**
- * @brief Clears the least significant bits of each element in an array.
- *
- * @tparam T The type of the elements in the input array.
- * @param a Pointer to the input array.
- * @param n_elem The number of elements in the input array.
- * @param n The number of least significant bits to clear.
- * @param shaved Pointer to the output array to store the modified elements.
- */
-template <typename T>
-void shave_template(T *a, size_t n_elem, int n, T *shaved) {
-	for (size_t i = 0; i < n_elem; i++) {
-		typename HELP<T>::type b;
-		std::memcpy(&b, &a[i], sizeof(T));
-		shave_bitset(&b, n);
-		std::memcpy(&shaved[i], &b, sizeof(T));
-	}
-}
-
-/** @brief replaces specified number of least significant bits from given bitset with 10000...
- *
- *  @tparam n size of bitset
- *  @param b pointer to bitset to shave
- *  @param n number of bits to shave
- */
 template <size_t nbits>
-void halfshave_bitset(std::bitset<nbits> *b, int n) {
-	std::bitset<nbits> keep_mask = -1;	// all 1's
-	keep_mask <<= n;
-	*b &= keep_mask;
-	std::bitset<nbits> round_up_mask = 0x80000000;
-	round_up_mask >>= (nbits - n - 1);
-	*b |= round_up_mask;
+void set_bitset(std::bitset<nbits> *value, int n) {
+    real_info_detail::transform_bitset(value, n, real_info_detail::bit_operation::set);
 }
 
-/**
- * @brief half shaves (i.e. replaces with 100...) the least significant bits of each element in an array.
- *
- * @tparam T The type of the elements in the input array.
- * @param a Pointer to the input array.
- * @param n_elem The number of elements in the input array.
- * @param n The number of least significant bits to clear.
- * @param halfshaved Pointer to the output array to store the modified elements.
- */
-template <typename T>
-void halfshave_template(T *a, size_t n_elem, int n, T *halfshaved) {
-	for (size_t i = 0; i < n_elem; i++) {
-		typename HELP<T>::type b;
-		std::memcpy(&b, &a[i], sizeof(T));
-		halfshave_bitset(&b, n);
-		std::memcpy(&halfshaved[i], &b, sizeof(T));
-	}
-}
-
-/**
- *  @brief Rounds the least significant bits of a bitset to the specified number of bits.
- *         Does this by creating an upper and lower mask to isolate the nth bit as a bitset
- *		   then adds it to the original bitset that had n-1 least significant bits cleared. This is a hacky way to do rounding since we can't do math operations with bitsets, but it works.
- *
- *  @tparam n size of bitset
- *  @param b pointer to bitset to round
- *  @param n number of bits to round to
- */
 template <size_t nbits>
-void round_bitset(std::bitset<nbits> *b, int n){
-	int mantissa_bits = nbits - get_n_exponent_bits(nbits) - 1;
-	std::bitset<nbits> mask = -1;	// all 1's
-	std::bitset<nbits> lower_mask = mask << n;
-	std::bitset<nbits> upper_mask = mask >> (nbits - n + 1);
-	int keepbits = mantissa_bits - n;
-	int shift = mantissa_bits - keepbits - 1;
-	shift -= (keepbits == mantissa_bits) ? 1 : 0;
-
-	if (nbits == 32) {
-		std::uint32_t temp_b, upper_mask_uint;
-		std::memcpy(&temp_b, b, sizeof(std::uint32_t));
-		std::memcpy(&upper_mask_uint, &upper_mask, sizeof(std::uint32_t));
-		temp_b += upper_mask_uint + ((temp_b >> shift) & 1);
-		std::memcpy(b, &temp_b, sizeof(std::uint32_t));
-		*b &= lower_mask;
-	} else if (nbits == 64) {
-		std::uint64_t temp_b, upper_mask_uint;
-		std::memcpy(&temp_b, b, sizeof(std::uint64_t));
-		std::memcpy(&upper_mask_uint, &upper_mask, sizeof(std::uint64_t));
-		temp_b += upper_mask_uint + ((temp_b >> shift) & 1);
-		std::memcpy(b, &temp_b, sizeof(std::uint64_t));
-		*b &= lower_mask;
-	} else {
-		std::cerr << "Unsupported bit size: " << nbits << "\n";
-	}
+void halfshave_bitset(std::bitset<nbits> *value, int n) {
+    real_info_detail::transform_bitset(value, n, real_info_detail::bit_operation::halfshave);
 }
 
-/**
- * @brief Performs bit rounding to the specified number of bits.
- *
- * @tparam T The type of the elements in the input array.
- * @param a Pointer to the input array.
- * @param n_elem The number of elements in the input array.
- * @param n The number of least significant bits to clear.
- * @param bit_rounding_result Pointer to the output array to store the modified elements.
- */
-template <typename T>
-void bit_rounding_template(T *a, size_t n_elem, int n, T *bit_rounding_result) {
-	for (size_t i = 0; i < n_elem; i++) {
-		typename HELP<T>::type b;
-		std::memcpy(&b, &a[i], sizeof(T));
-		round_bitset(&b, n);
-		std::memcpy(&bit_rounding_result[i], &b, sizeof(T));
-	}
-}
-
-/** @brief sets specified number of least significant bits from given bitset to 1
- *
- *  @tparam n size of bitset
- *  @param b pointer to bitset to set
- *  @param n number of bits to set
- */
 template <size_t nbits>
-void set_bitset(std::bitset<nbits> *b, int n) {
-	std::bitset<nbits> mask = -1;	// all 1's
-	mask <<= n;
-	*b |= ~mask;
+void round_bitset(std::bitset<nbits> *value, int n) {
+    real_info_detail::transform_bitset(value, n, real_info_detail::bit_operation::round);
 }
 
-/**
- * @brief Clears the least significant bits of each element in an array.
- *
- * @tparam T The type of the elements in the input array.
- * @param a Pointer to the input array.
- * @param n_elem The number of elements in the input array.
- * @param n The number of least significant bits to clear.
- * @param set Pointer to the output array to store the modified elements.
- */
 template <typename T>
-void set_template(T *a, size_t n_elem, int n, T *set) {
-	for (size_t i = 0; i < n_elem; i++) {
-		typename HELP<T>::type b;
-		std::memcpy(&b, &a[i], sizeof(T));
-		set_bitset(&b, n);
-		std::memcpy(&set[i], &b, sizeof(T));
-	}
+void shave_template(T *input, size_t n_elem, int n, T *output) {
+    real_info_detail::transform_native_array(input, n_elem, n, output, real_info_detail::bit_operation::shave);
 }
 
-/**
- * @brief Clears the least significant bits of each element in an array.
- *
- * @tparam T The type of the elements in the input array.
- * @param a Pointer to the input array.
- * @param n_elem The number of elements in the input array.
- * @param n The number of least significant bits to clear.
- * @param groomed Pointer to the output array to store the modified elements.
- */
 template <typename T>
-void groom_template(T *a, size_t n_elem, int n, T *groomed) {
-	for (size_t i = 0; i < n_elem; i++) {
-		typename HELP<T>::type b;
-		std::memcpy(&b, &a[i], sizeof(T));
-		if (i % 2 == 0)
-		  set_bitset(&b, n);
-		else
-		  shave_bitset(&b, n);
-		std::memcpy(&groomed[i], &b, sizeof(T));
-	}
+void set_template(T *input, size_t n_elem, int n, T *output) {
+    real_info_detail::transform_native_array(input, n_elem, n, output, real_info_detail::bit_operation::set);
+}
+
+template <typename T>
+void halfshave_template(T *input, size_t n_elem, int n, T *output) {
+    real_info_detail::transform_native_array(input, n_elem, n, output, real_info_detail::bit_operation::halfshave);
+}
+
+template <typename T>
+void bit_rounding_template(T *input, size_t n_elem, int n, T *output) {
+    real_info_detail::transform_native_array(input, n_elem, n, output, real_info_detail::bit_operation::round);
+}
+
+template <typename T>
+void groom_template(T *input, size_t n_elem, int n, T *output) {
+    real_info_detail::transform_native_array(input, n_elem, n, output, real_info_detail::bit_operation::set, true);
 }
 
 /**

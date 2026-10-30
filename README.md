@@ -47,6 +47,26 @@ every scope, including when fixed-point mode is disabled. Fixed-point conversion
 continues to map the input range to codes from zero through `2^63 - 1024`; its
 precision is not configurable through YAML.
 
+## Bit operations
+
+Shaving, setting, half-shaving, rounding, and grooming accept counts from zero
+through 23 for native `float`, 52 for native `double`, or 63 in fixed-point mode.
+Native counts modify fraction bits; rounding can carry into the exponent.
+Invalid counts throw C++ `fixed_point_error` before output is modified, including
+for constant inputs. The C bindings retain their existing fatal-error policy.
+
+All zero-bit array operations copy the input bit patterns exactly, including
+signed zeros, without a fixed-point encode/decode round trip. Native operations
+preserve infinities and NaN payloads. Finite rounding may overflow to infinity.
+Half-shaving clears the lowest `n` bits and sets bit `n - 1`; nearest-even
+rounding compares the discarded bits with the midpoint and resolves ties using
+the least-significant retained bit. The same unsigned implementation backs
+`bits<T>`, the legacy array functions, and the native 32/64-bit bitset helpers.
+
+Fixed-point operations keep codes within `[0, Q]`, where `Q = 2^63 - 1024`.
+Setting, half-shaving, or rounding above that endpoint saturates to `Q` before
+decoding. Constant fixed-point inputs remain unchanged for every valid count.
+
 ## Fortran interface
 
 Compile `src/bit_info_mod.f90` with the same Fortran compiler used for the

@@ -174,19 +174,36 @@ Search decisions, tolerance comparisons, and boundary/output behavior are
 preserved; the correctness repairs in step 8 remain to-do. These focused checks
 do not replace full CMake/CTest verification in an approved allocation.
 
-## 6. Correct rounding and half-shaving
+## 6. Correct rounding and half-shaving — implemented
 
 Relevant source: rounding and half-shaving helpers in
 [src/bit_info.h](src/bit_info.h).
 
-Bit rounding uses a discarded bit for tie handling rather than the last retained
-bit, and rounding away zero bits performs a negative shift. Half-shaving uses
-incorrect bit positions and a 32-bit starting mask for doubles.
+The original rounding used a discarded bit for tie handling and performed a
+negative shift for zero bits. Half-shaving used incorrect bit positions and a
+32-bit starting mask for doubles.
 
-- [ ] Consolidate the operations around unsigned integer representations.
-- [ ] Make zero-bit operations identities.
-- [ ] Validate bit counts.
-- [ ] Implement consistent nearest-even rounding.
+- [x] Consolidate shaving, setting, half-shaving, and rounding into shared unsigned
+  operations used by `bits<T>`, legacy array wrappers, and native bitset helpers.
+  Convert native values with `std::bit_cast` and bitsets through their public API.
+- [x] Make zero-bit operations exact identities, including fixed-point arrays
+  without an encode/decode round trip and signed-zero bit patterns.
+- [x] Validate counts before modifying output: 0–23 for native float, 0–52 for
+  native double, and 0–63 for fixed-point, including constant inputs. Invalid
+  counts use the existing `fixed_point_error` path. Preserve native infinities
+  and NaN payloads; clamp transformed fixed-point codes to the safe endpoint.
+- [x] Implement nearest-even rounding using the least-significant retained bit
+  for ties and half-shaving with bit `n - 1`, independent of the native width.
+
+Added [tests/test_bit_operations.cpp](tests/test_bit_operations.cpp), covering
+32/64-bit nearest-grid rounding, below/above midpoint and even/odd ties,
+negative/native values, exponent carry, subnormals, nonfinite payloads,
+zero-bit/in-place identities, invalid counts, constant inputs, and fixed-point
+counts up to 63 with endpoint saturation. It passed with AddressSanitizer,
+UndefinedBehaviorSanitizer, and leak detection. The selection-buffer regression
+also passed with both sanitizers; existing redundancy/preservation expectations
+and a strict binding-source syntax check passed. Full CMake/CTest verification
+in an approved allocation remains pending.
 
 ## 7. Use consistent samples for information metrics
 
@@ -210,7 +227,8 @@ Relevant source: the linear and binary selectors in
 
 The selectors disagree on strict versus inclusive tolerance. Fresh binary searches
 never evaluate the maximum permitted count; linear searches resumed from a
-previous count can enter exponent bits. The general all-masked binary-search
+previous count can request counts beyond the native mantissa (now rejected by
+the bit-operation validation from step 6). The general all-masked binary-search
 return leaves the output buffer untouched. Step 1 addressed the constant-array
 case, including filling its output, but the remaining cases still need repair.
 
