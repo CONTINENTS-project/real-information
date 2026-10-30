@@ -84,6 +84,8 @@ int main() {
     test_assert(indentless.read<bool>("mask_zero", "A"), __FILE__, __LINE__, "Indentless sequence rejected");
 
     const std::vector<std::pair<std::string, std::string>> malformed = {
+        {"fixed_point: false\nfixed_point_scale_bits: 16\n", "fixed_point_scale_bits has been removed"},
+        {"variables:\n  - var_name: UNUSED\n    fixed_point_scale_bits: 5\n", "fixed_point_scale_bits has been removed"},
         {"mask_zero: false\nmask_zero: true\n", "duplicate key 'mask_zero'"},
         {"variables: []\nvariables: []\n", "duplicate key 'variables'"},
         {"variables:\n  - var_name: A\n  - var_name: A\n", "duplicate variable 'A'"},
@@ -121,6 +123,15 @@ int main() {
     };
     for (const auto &[text, detail] : malformed) {
         rejects([&] { configuration(text); }, detail);
+    }
+    for (const char *name : {"fixed_point_config.yaml", "floating_point_config.yaml", "scaling_config.yaml"}) {
+        const auto path = (std::filesystem::path(__FILE__).parent_path().parent_path() / "examples" / name).string();
+        const yaml_config example(path.c_str());
+        test_assert(example.read<bool>("fixed_point") == (std::string(name) == "fixed_point_config.yaml"),
+                    __FILE__, __LINE__, "Example has unexpected fixed-point mode");
+        test_assert(example.read<bool>("mantissa_only") == (std::string(name) == "scaling_config.yaml") &&
+                    !example.read<bool>("mask_zero"),
+                    __FILE__, __LINE__, "Example flags were not preserved");
     }
     return 0;
 }

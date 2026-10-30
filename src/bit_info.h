@@ -165,6 +165,9 @@ class yaml_config {
     }
 
     void insert(scalar_map &fields, const std::string &key, scalar value) const {
+        if (key == "fixed_point_scale_bits") {
+            fail(value.line, "fixed_point_scale_bits has been removed; fixed-point uses a fixed 63-bit range mapping");
+        }
         if (!value.quoted) {
             if (value.value.empty()) fail(value.line, key + ": expected a scalar value");
             if (value.value.find_first_of("[{}]|>&*!%@`") == 0 || value.value == "~" ||

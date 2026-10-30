@@ -42,6 +42,11 @@ their title/upper-case spellings. Numbers use decimal notation, optionally
 scientific notation for floating point, and must be finite and fit their target
 type. Malformed values are rejected rather than partially converted.
 
+The unused `fixed_point_scale_bits` setting has been removed and is rejected in
+every scope, including when fixed-point mode is disabled. Fixed-point conversion
+continues to map the input range to codes from zero through `2^63 - 1024`; its
+precision is not configurable through YAML.
+
 ## Fortran interface
 
 Compile `src/bit_info_mod.f90` with the same Fortran compiler used for the

@@ -135,7 +135,15 @@ still pending.
   individually; complete verification remains pending.
 - [ ] TODO after all verification testing is complete: connect variable overrides
   to the public API. Existing exported entry points still use global settings.
-- [ ] Implement or remove the unused `fixed_point_scale_bits` setting.
+- [x] Remove the unused `fixed_point_scale_bits` setting from examples/fixtures
+  and its old parser assertions. Reject the obsolete key in global and variable
+  scopes, including unused variable entries and floating-point mode. The fixed
+  range-normalized mapping to `Q = 2^63 - 1024` remains unchanged. Regression
+  coverage is included in `test_config_scopes`, including loading all three
+  updated example configurations. All three focused configuration tests passed
+  against the final source, and `src/bit_info.cpp` passed a syntax-only compiler
+  check. Full CMake/CTest verification in an approved allocation is still pending;
+  the two deferred sub-tasks above remain to-do until all verification is complete.
 
 ## 5. Remove leaks and input-sized stack allocations
 
