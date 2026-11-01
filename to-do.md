@@ -306,10 +306,10 @@ verification of these changes.
   Require OpenMP 4.5+ for the existing array-section reduction. Remove private
   `-fopenmp` and unconditional `-g -O3` flags; CMake's compiler discovery and
   Debug/Release settings now control those options.
-- [x] Install `bit_info.h`, the `my_rounding.h` compatibility shim, the Python
-  wrapper, and `bit_info_mod.f90`. Use `GNUInstallDirs` for library, include, and
-  binary destinations. The Fortran interface is installed as source for the
-  application's compiler; Fortran remains optional for the core build.
+- [x] Install `bit_info.h`, the Python wrapper, and `bit_info_mod.f90`. Use
+  `GNUInstallDirs` for library, include, and binary destinations. The Fortran
+  interface is installed as source for the application's compiler; Fortran
+  remains optional for the core build.
 - [x] Separate build/install include paths and export
   `real_information::bit_info` with package configuration/version metadata.
   Consumers use `find_package(real_information CONFIG REQUIRED)`; the package
@@ -395,8 +395,6 @@ machine-specific absolute paths, and input loading does not check read failures.
 - [ ] Separate configuration, metrics, selection, and bindings.
 - [ ] Introduce consistent namespaces and immutable constants.
 - [ ] Remove debug output and obsolete comments.
-- [x] Remove duplicate implementations from `src/my_rounding.h`; retain the
-  include shim for the current public header.
 - [x] Make the header definition of `entropy` inline (step 10).
 - [x] Remove unsafe bitset reinterpretation and the obsolete counting paths that
   used it. Standalone rounding diagnostics also use unsigned-word formatting.

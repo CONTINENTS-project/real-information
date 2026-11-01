@@ -23,12 +23,11 @@ cmake --build build --parallel 2
 cmake --install build
 ```
 
-The installation contains `include/bit_info.h`, the compatibility shim
-`include/my_rounding.h`, `include/bit_info_mod.f90`, `real_info.py` at the prefix
-root, and `lib/bit_info.so`. Standard CMake install-directory settings apply;
-for example, `-DCMAKE_INSTALL_LIBDIR=lib64` puts the library and CMake package
-under `lib64/`. Keep installation directories relative to the prefix to allow
-moving the whole installation.
+The installation contains `include/bit_info.h`, `include/bit_info_mod.f90`,
+`real_info.py` at the prefix root, and `lib/bit_info.so`. Standard CMake
+install-directory settings apply; for example, `-DCMAKE_INSTALL_LIBDIR=lib64`
+puts the library and CMake package under `lib64/`. Keep installation directories
+relative to the prefix to allow moving the whole installation.
 
 An external C++ application's `CMakeLists.txt` can use:
 

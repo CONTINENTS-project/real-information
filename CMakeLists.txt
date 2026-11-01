@@ -33,7 +33,7 @@ install(TARGETS bit_info
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
-install(FILES src/bit_info.h src/my_rounding.h src/bit_info_mod.f90
+install(FILES src/bit_info.h src/bit_info_mod.f90
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
 
