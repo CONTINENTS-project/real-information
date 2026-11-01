@@ -287,20 +287,70 @@ and selector guards do not replace checks in these individual routines.
 - [ ] Count unsigned bit representations.
 - [ ] Define behavior for arrays with fewer than two elements.
 
-## 10. Repair build and installation support
+## 10. Repair build and installation support — implemented; build verification pending
 
 Relevant source: [CMakeLists.txt](CMakeLists.txt),
-[src/bit_info.h](src/bit_info.h), and [src/real_info.py](src/real_info.py).
+[cmake/real_informationConfig.cmake.in](cmake/real_informationConfig.cmake.in),
+[src/bit_info.h](src/bit_info.h), [src/real_info.py](src/real_info.py), and
+[tests/installation/check_installation.py](tests/installation/check_installation.py).
 
-CMake hardcodes OpenMP flags without propagating them to consumers of
-header-defined algorithms. The core header requires an apparently unused `mpi.h`,
-but CMake declares no MPI dependency. Installation omits public headers, and Python
-library discovery assumes a surrounding checkout layout.
+The implementation now provides an installation for separate C++, Python, and
+Fortran consumers. Configuration and the small mocked-loader regression have
+passed; actual library builds and installed-consumer execution still require an
+approved compute allocation. The existing workflow installation was not used as
+verification of these changes.
 
-- [ ] Remove the unused MPI dependency.
-- [ ] Use CMake's OpenMP target.
-- [ ] Install the public interfaces.
-- [ ] Locate the shared library relative to its installation.
+- [x] Remove the unused `mpi.h` include. The core no longer declares an MPI
+  dependency. Confirming a clean non-MPI build remains part of the build checks.
+- [x] Publish C++20 and `OpenMP::OpenMP_CXX` as public target requirements.
+  Require OpenMP 4.5+ for the existing array-section reduction. Remove private
+  `-fopenmp` and unconditional `-g -O3` flags; CMake's compiler discovery and
+  Debug/Release settings now control those options.
+- [x] Install `bit_info.h`, the `my_rounding.h` compatibility shim, the Python
+  wrapper, and `bit_info_mod.f90`. Use `GNUInstallDirs` for library, include, and
+  binary destinations. The Fortran interface is installed as source for the
+  application's compiler; Fortran remains optional for the core build.
+- [x] Separate build/install include paths and export
+  `real_information::bit_info` with package configuration/version metadata.
+  Consumers use `find_package(real_information CONFIG REQUIRED)`; the package
+  discovers OpenMP before loading the target. Initial package metadata uses
+  version `0.1.0` with compatibility within the same minor release.
+- [x] Configure the installed `real_info.py` with a library path relative to its
+  own directory, honoring a configured `lib64` layout and prefix relocation.
+  Preserve `import real_info`, the Linux filename `bit_info.so`, and the explicit
+  `REAL_INFO_LIB_PATH` override. Resolve explicit paths before loading; missing
+  overrides fail without fallback. Missing-file and loader errors report the
+  attempted path and override guidance. Source-tree development uses an explicit
+  library override.
+- [x] Make the header-defined `entropy` function inline so multiple application
+  translation units can include the installed header without duplicate symbols.
+- [x] Document installation, CMake/Python/Fortran usage, runtime library lookup,
+  and the verification procedure in [README.md](README.md).
+
+Verification status:
+
+- [x] Configure fresh Debug/`lib64` test-enabled and Release/`lib` test-disabled
+  builds with IntelLLVM C++. The test-enabled configuration also detected
+  IntelLLVM Fortran; OpenMP 5.1 was discovered through CMake. No project build
+  was run.
+- [x] Run the six small checks in
+  [tests/test_library_discovery.py](tests/test_library_discovery.py) directly and
+  through CTest, including the configured wrapper. These mock the native loader;
+  they check defaults, relocation, explicit/relative overrides, missing files,
+  and loader diagnostics without claiming a native-library execution result.
+- [ ] Run [tests/installation/check_installation.py](tests/installation/check_installation.py)
+  in an approved compute allocation. It builds Release/`lib` with tests disabled
+  and Debug/`lib64` with tests enabled, installs into fresh prefixes, moves each
+  prefix, and retains all output. Parallel builds and OpenMP use at most two
+  processes/threads. Only the focused loader test is run from the main test tree.
+- [ ] Through that script, build and run the external CMake consumer in
+  [tests/installation](tests/installation), including two C++ translation units,
+  a header-defined OpenMP metric, and an exported C symbol. Check installed
+  Python production selectors before/after moving the prefix, valid/missing
+  library overrides, and the installed Fortran interface when its compiler is
+  available. The old prefix is absent during relocated-consumer checks.
+- [ ] Complete the repaired full test-enabled build/CTest baseline under step 12.
+  Focused installation checks do not establish the full numerical baseline.
 
 ## 11. Bring examples into agreement with the API
 
@@ -347,7 +397,7 @@ machine-specific absolute paths, and input loading does not check read failures.
 - [ ] Remove debug output and obsolete comments.
 - [x] Remove duplicate implementations from `src/my_rounding.h`; retain the
   include shim for the current public header.
-- [ ] Address the non-inline header definition of `entropy`.
+- [x] Make the header definition of `entropy` inline (step 10).
 - [x] Remove unsafe bitset reinterpretation and the obsolete counting paths that
   used it. Standalone rounding diagnostics also use unsigned-word formatting.
 - [ ] Keep generated binaries and caches in build/output directories.
@@ -404,7 +454,6 @@ cmake --build build --parallel 2
 cmake --install build
 
 export PYTHONPATH="$PWD/install${PYTHONPATH:+:$PYTHONPATH}"
-export REAL_INFO_LIB_PATH="$PWD/install/lib/bit_info.so"
 ```
 
 On NSF NCAR systems, load suitable compiler/CMake modules and perform the build on
@@ -420,3 +469,24 @@ Configuration documentation should explain `mantissa_only`, `mask_zero`, and
 supported input shapes and dtypes. Include a minimal Python example once the
 bindings are repaired, plus the status and build instructions for the Fortran
 interface and CLI.
+
+## 13. Review information-metric edge-case conventions
+
+Relevant source: [src/bit_info.h](src/bit_info.h),
+[tests/test_information_metrics.cpp](tests/test_information_metrics.cpp), and
+[tests/test_selection_buffers.cpp](tests/test_selection_buffers.cpp).
+
+Step 7 introduced explicit conventions where there are no eligible samples or
+normalization would divide by zero. Review whether these conventions give the
+intended interpretation of redundancy and information preservation.
+
+- [ ] Review empty/null inputs, singletons, all-masked inputs, and the distinction
+  between having no samples and measuring zero information from retained samples.
+- [ ] Review redundancy for equal and different constant bits, including signed
+  zeros and the effect of masking.
+- [ ] Revisit the preservation fallback of one for bitwise-identical arrays and
+  zero otherwise when total spatial information is zero. Include nonconstant
+  references such as `[1, 1, 2, 2, 1]` and both unchanged and changed comparisons.
+- [ ] Check how these choices affect selector tolerances and selected bit counts.
+- [ ] Keep regression expectations and documentation aligned with the reviewed
+  policy, including the zero-information assertion in `test_selection_buffers`.

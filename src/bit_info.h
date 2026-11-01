@@ -21,7 +21,6 @@
 #include <cstring>
 #include <cstdint>
 #include <stdexcept>
-#include <mpi.h>
 
 // Set EPS
 static const float EPS = 1e-16;
@@ -850,7 +849,7 @@ void bit_count_bits(const real_info_params<T> &RI_params, T *A, size_t n_elem, s
  * @param n_elem Number of elements in the array.
  * @return The Shannon entropy of the distribution represented by A.
  */
-double entropy(double *A, size_t n_elem) {
+inline double entropy(double *A, size_t n_elem) {
 	double H = 0;
 
 	for (size_t i = 0; i < n_elem; i++) {

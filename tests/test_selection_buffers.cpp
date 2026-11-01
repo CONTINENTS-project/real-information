@@ -72,8 +72,8 @@ void check_selection_buffers() {
     std::array<T, 5> zero_information = {T(1), T(1), T(2), T(2), T(1)};
     params.fixed_point = false;
     test_assert(preserved_information_template(params, zero_information.data(), zero_information.data(),
-                                              zero_information.size()) == 0.0,
-                __FILE__, __LINE__, "Zero-information return changed");
+                                              zero_information.size()) == 1.0,
+                __FILE__, __LINE__, "Unchanged zero-information input must be lossless");
     std::array<T, 3> constant = {T(2), T(2), T(2)};
     std::array<T, 3> constant_output{};
     test_assert(pick_bits_to_shave_template(params, constant.data(), constant.size(), 0.99, 0) == 0,

@@ -33,6 +33,11 @@ if(TEST_PY_SOURCES)
         foreach(test_py IN LISTS TEST_PY_SOURCES)
             get_filename_component(test_name "${test_py}" NAME_WE)
             add_test(NAME "py_${test_name}" COMMAND "${Python3_EXECUTABLE}" "${test_py}")
+            if(test_name STREQUAL "test_library_discovery")
+                set_tests_properties("py_${test_name}" PROPERTIES ENVIRONMENT
+                    "REAL_INFO_TEST_WRAPPER=${PROJECT_BINARY_DIR}/real_info.py;REAL_INFO_TEST_LIBRARY_RELATIVE_PATH=${REAL_INFO_LIBRARY_RELATIVE_PATH}"
+                )
+            endif()
         endforeach()
     else()
         message(WARNING "Python tests found, but no Python3 interpreter was detected by CMake.")

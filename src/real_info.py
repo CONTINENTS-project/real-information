@@ -3,16 +3,14 @@ import os
 from pathlib import Path
 import numpy as np
 
-# Load the compiled C library
-_DEFAULT_LIB_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "install"
-    / "real-information"
-    / "lib"
-    / "bit_info.so"
-)
+# CMake substitutes the relative path in installed copies. Unconfigured source
+# copies use the conventional layout; set REAL_INFO_LIB_PATH for a build-tree .so.
+_LIBRARY_RELATIVE_PATH = "@REAL_INFO_LIBRARY_RELATIVE_PATH@"
+if _LIBRARY_RELATIVE_PATH.startswith("@"):
+    _LIBRARY_RELATIVE_PATH = "lib/bit_info.so"
+_DEFAULT_LIB_PATH = Path(__file__).resolve().parent / _LIBRARY_RELATIVE_PATH
 
-_lib_path = Path(os.environ.get("REAL_INFO_LIB_PATH", _DEFAULT_LIB_PATH))
+_lib_path = Path(os.environ.get("REAL_INFO_LIB_PATH", _DEFAULT_LIB_PATH)).expanduser().resolve()
 
 if not _lib_path.is_file():
     raise FileNotFoundError(
@@ -20,7 +18,14 @@ if not _lib_path.is_file():
         "Set REAL_INFO_LIB_PATH to its full path."
     )
 
-real_info = ctypes.CDLL(str(_lib_path))
+try:
+    real_info = ctypes.CDLL(str(_lib_path))
+except OSError as error:
+    raise OSError(
+        f"Cannot load bit_info shared library at {_lib_path}: {error}. "
+        "Check its runtime dependencies or set REAL_INFO_LIB_PATH to the full "
+        "path of a compatible library."
+    ) from error
 
 real_info.real_info_last_fixed_point_error.argtypes = []
 real_info.real_info_last_fixed_point_error.restype = ctypes.c_char_p

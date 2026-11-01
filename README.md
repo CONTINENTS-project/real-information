@@ -1,5 +1,69 @@
 C++ implementation of bitinformation.jl from [Klower et al. 2021](https://www.nature.com/articles/s43588-021-00156-2)
 
+## Build and install
+
+Requirements: CMake 3.16+, a C++20 compiler, and OpenMP 4.5+ (the header uses
+array-section reductions). Python usage additionally needs
+NumPy. A Fortran compiler is optional; applications compile the installed Fortran
+interface source with their own compiler.
+
+Configure from the repository directory with a local installation prefix:
+
+```bash
+cmake -S . -B build \
+  -DBUILD_TESTING=OFF \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX="$PWD/install"
+```
+
+Build and install on a workstation or allocated compute node:
+
+```bash
+cmake --build build --parallel 2
+cmake --install build
+```
+
+The installation contains `include/bit_info.h`, the compatibility shim
+`include/my_rounding.h`, `include/bit_info_mod.f90`, `real_info.py` at the prefix
+root, and `lib/bit_info.so`. Standard CMake install-directory settings apply;
+for example, `-DCMAKE_INSTALL_LIBDIR=lib64` puts the library and CMake package
+under `lib64/`. Keep installation directories relative to the prefix to allow
+moving the whole installation.
+
+An external C++ application's `CMakeLists.txt` can use:
+
+```cmake
+find_package(real_information CONFIG REQUIRED)
+add_executable(my_application main.cpp)
+target_link_libraries(my_application PRIVATE real_information::bit_info)
+```
+
+Configure that application with `-DCMAKE_PREFIX_PATH=/path/to/install`. The target
+supplies the include directory, C++20 requirement, and OpenMP compiler/linker
+requirements. CMake package metadata currently uses version `0.1.0`, with version
+compatibility within the same minor release. Debugging and optimization options
+follow the selected CMake build configuration.
+
+For Python, put the installation prefix on `PYTHONPATH`:
+
+```bash
+export PYTHONPATH="$PWD/install${PYTHONPATH:+:$PYTHONPATH}"
+python -c 'import real_info'
+```
+
+The installed wrapper locates the library relative to itself, including a
+configured `lib64/` layout. Moving the prefix preserves that lookup. To use a
+source-tree wrapper with a build-tree library, or select another library, set
+`REAL_INFO_LIB_PATH` to its full path. 
+
+Fortran applications can compile the installed `include/bit_info_mod.f90` and
+link the shared library by its full filename. It has no `lib` prefix, so a plain
+`-lbit_info` lookup is insufficient. Arrange the executable's runtime library
+search path with the application's CMake target/RPATH settings or, on Linux,
+`LD_LIBRARY_PATH` containing the installation's library directory. The installed
+CMake target is also available to mixed C++/Fortran CMake applications.
+
+
 ## Configuration
 
 `real_info_params` requires the top-level boolean settings `mantissa_only`,
@@ -41,32 +105,6 @@ boolean conversions require unquoted values. Booleans accept `true`/`false` and
 their title/upper-case spellings. Numbers use decimal notation, optionally
 scientific notation for floating point, and must be finite and fit their target
 type. Malformed values are rejected rather than partially converted.
-
-The unused `fixed_point_scale_bits` setting has been removed and is rejected in
-every scope, including when fixed-point mode is disabled. Fixed-point conversion
-continues to map the input range to codes from zero through `2^63 - 1024`; its
-precision is not configurable through YAML.
-
-## Bit operations
-
-Shaving, setting, half-shaving, rounding, and grooming accept counts from zero
-through 23 for native `float`, 52 for native `double`, or 63 in fixed-point mode.
-Native counts modify fraction bits; rounding can carry into the exponent.
-Invalid counts throw C++ `fixed_point_error` before output is modified, including
-for constant inputs. The C bindings retain their existing fatal-error policy.
-
-All zero-bit array operations copy the input bit patterns exactly, including
-signed zeros, without a fixed-point encode/decode round trip. Native operations
-preserve infinities and NaN payloads. Finite rounding may overflow to infinity.
-Half-shaving clears the lowest `n` bits and sets bit `n - 1`; nearest-even
-rounding compares the discarded bits with the midpoint and resolves ties using
-the least-significant retained bit. The unsigned implementation backs `bits<T>`
-and the `*_bits` array functions. Obsolete transformation and bit-counting
-implementations have been removed.
-
-Fixed-point operations keep codes within `[0, Q]`, where `Q = 2^63 - 1024`.
-Setting, half-shaving, or rounding above that endpoint saturates to `Q` before
-decoding. Constant fixed-point inputs remain unchanged for every valid count.
 
 ## Fortran interface
 
