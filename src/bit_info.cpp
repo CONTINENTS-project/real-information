@@ -187,6 +187,33 @@ extern "C" {
 	}
 }
 
+// New symbols keep the legacy C/Fortran ABI intact. These entry points report
+// errors to ctypes instead of terminating the Python worker on invalid caps.
+template <typename T>
+int capped_selection(T *input, size_t count, double tolerance, int previous,
+                     char *config, int cap, T *output) {
+    fixed_point_error_message.clear();
+    try {
+        if (cap < 0) throw fixed_point_error("max_shave_bits must be nonnegative.");
+        real_info_params<T> params(config, input, count);
+        return pick_bits_to_shave_binary_search_capped_template(
+            params, input, count, tolerance, previous, cap, output);
+    } catch (const std::exception &error) {
+        fixed_point_error_message = error.what();
+        return -1;
+    }
+}
+
+extern "C" int pick_bits_to_shave_binary_search_capped_float(
+    float *input, size_t count, double tolerance, int previous, char *config, int cap, float *output) {
+    return capped_selection(input, count, tolerance, previous, config, cap, output);
+}
+
+extern "C" int pick_bits_to_shave_binary_search_capped_double(
+    double *input, size_t count, double tolerance, int previous, char *config, int cap, double *output) {
+    return capped_selection(input, count, tolerance, previous, config, cap, output);
+}
+
 extern "C" {
 	double entropy_float(float *A, size_t n_elem) {
 		return bitpattern_entropy<float>(A, n_elem);

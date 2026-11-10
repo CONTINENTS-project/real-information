@@ -1249,7 +1249,11 @@ int pick_bits_to_shave_template(const real_info_params<T> &RI_params, T *A, size
  *         preserving the exponent bits and sign bit.
  */
 template <typename T>
-int get_max_shave_bits(const real_info_params<T> &RI_params) {
+int get_max_shave_bits(const real_info_params<T> &RI_params, int requested_cap = -1) {
+  if (requested_cap != -1) {
+    real_info_detail::validate_bit_count<T>(requested_cap, RI_params.fixed_point);
+    return requested_cap;
+  }
   int max_bits = sizeof(T) * CHAR_BIT; 
   if (RI_params.fixed_point) {
 	max_bits = sizeof(int64_t) * CHAR_BIT;
@@ -1358,6 +1362,46 @@ int pick_bits_to_shave_binary_search_template(const real_info_params<T> &RI_para
   }
 
   return start_bit;
+}
+
+/** Inclusive bounded search. A count and its candidate are committed together.
+ * The information score is assumed monotone, as in the legacy binary selector.
+ * Uncapped entry points above retain their existing selection behaviour.
+ */
+template <typename T>
+int pick_bits_to_shave_binary_search_capped_template(
+    const real_info_params<T> &params, T *input, size_t count, double tolerance,
+    int previous, int requested_cap, T *output) {
+    const int cap = get_max_shave_bits(params, requested_cap);
+    if (count == 0 || input == nullptr || output == nullptr || input == output) {
+        throw fixed_point_error("Capped selection requires nonempty input and a separate output array.");
+    }
+    if (!std::isfinite(tolerance) || tolerance < 0 || tolerance > 1) {
+        throw fixed_point_error("Information tolerance must be finite and between 0 and 1.");
+    }
+    // Initialise every early-return path, using the representation's zero-bit
+    // operation (which still performs the configured fixed-point conversion).
+    shave_bits(params, input, count, 0, output);
+    if (cap == 0 || is_constant_array(input, count)) return 0;
+    if (params.mask_zero && std::none_of(input, input + count,
+            [](T value) { return std::abs(value) >= EPS; })) return 0;
+
+    std::vector<T> candidate(count);
+    int low = 1, high = cap, selected = 0;
+    int trial = std::clamp(previous > 0 ? previous : cap / 2, low, high);
+    while (low <= high) {
+        shave_bits(params, input, count, trial, candidate.data());
+        const double preserved = preserved_information_template(params, input, candidate.data(), count);
+        if (std::isfinite(preserved) && preserved >= tolerance) {
+            selected = trial;
+            std::copy(candidate.begin(), candidate.end(), output);
+            low = trial + 1;
+        } else {
+            high = trial - 1;
+        }
+        if (low <= high) trial = low + (high - low) / 2;
+    }
+    return selected;
 }
 
 #endif

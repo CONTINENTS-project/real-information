@@ -129,34 +129,41 @@ def pick_bits_to_shave(A, n_elem, tol, current_bits, config_path):
         c_func.restype = ctypes.c_int
         return c_func(A.ctypes.data_as(ctypes.POINTER(ctypes.c_double)), n_elem, ctypes.c_double(tol), current_bits, config_path.encode('utf-8'))
 
-def pick_bits_to_shave_binary_search(A, n_elem, tol, current_bits, config_path):
-    """
-    Determine how many additional bits can be shaved from the mantissa of
-    A using binary search, and return the shaved copy of A.
+def pick_bits_to_shave_binary_search(A, n_elem, tol, current_bits, config_path, *, max_shave_bits=None):
+    """Return ``(selected_count, shaved_array)``; optionally bound the search.
 
-    :param A: array of float32 or float64 values.
-    :param n_elem: number of elements in A (must equal ``A.size``).
-    :param tol: tolerable relative information loss.
-    :param current_bits: number of bits already shaved from A.
-    :param config_path: path to yaml config file.
-    :return: tuple ``(n_bits, A_shaved)`` where ``A_shaved`` is a contiguous
-             numpy array of the same dtype as the input.
+    ``None`` retains the legacy selector. A supplied cap is inclusive and must
+    be an integer in the representation's range (float32: 23, float64: 52,
+    fixed-point: 63). Native code validates the representation-specific bound.
+    The returned array already corresponds to the returned count.
     """
-    if isinstance(config_path, Path):
-        config_path = str(config_path)
     A, dtype_str, n_elem = _validated_input(A, n_elem)
-    if dtype_str == "float":
-        c_func = real_info.pick_bits_to_shave_binary_search_float
-        c_func.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_size_t, ctypes.c_double, ctypes.c_int, ctypes.c_char_p, ctypes.POINTER(ctypes.c_float)]
-        c_func.restype = ctypes.c_int
-        A_shaved = np.zeros(n_elem, dtype=np.float32)
-        return (c_func(A.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), n_elem, ctypes.c_double(tol), current_bits, config_path.encode('utf-8'), A_shaved.ctypes.data_as(ctypes.POINTER(ctypes.c_float))), A_shaved)
+    scalar = ctypes.c_float if dtype_str == "float" else ctypes.c_double
+    pointer = ctypes.POINTER(scalar)
+    arguments = [A.ctypes.data_as(pointer), n_elem, ctypes.c_double(tol),
+                 int(current_bits), str(config_path).encode('utf-8')]
+    signature = [pointer, ctypes.c_size_t, ctypes.c_double, ctypes.c_int, ctypes.c_char_p]
+    if max_shave_bits is None:
+        name = "pick_bits_to_shave_binary_search_" + dtype_str
     else:
-        c_func = real_info.pick_bits_to_shave_binary_search_double
-        c_func.argtypes = [ctypes.POINTER(ctypes.c_double), ctypes.c_size_t, ctypes.c_double, ctypes.c_int, ctypes.c_char_p, ctypes.POINTER(ctypes.c_double)]
-        c_func.restype = ctypes.c_int
-        A_shaved = np.zeros(n_elem, dtype=np.float64)
-        return (c_func(A.ctypes.data_as(ctypes.POINTER(ctypes.c_double)), n_elem, ctypes.c_double(tol), current_bits, config_path.encode('utf-8'), A_shaved.ctypes.data_as(ctypes.POINTER(ctypes.c_double))), A_shaved)
+        if (isinstance(max_shave_bits, (bool, np.bool_)) or
+                not isinstance(max_shave_bits, (int, np.integer)) or
+                not 0 <= max_shave_bits <= 63):
+            raise ValueError("max_shave_bits must be an integer between 0 and 63")
+        name = "pick_bits_to_shave_binary_search_capped_" + dtype_str
+        if not hasattr(real_info, name):
+            raise RuntimeError(
+                f"Loaded library {_lib_path} does not support capped selection; "
+                "rebuild and install the matching native library and wrapper.")
+        signature.append(ctypes.c_int)
+        arguments.append(int(max_shave_bits))
+    function = getattr(real_info, name)
+    function.argtypes = signature + [pointer]
+    function.restype = ctypes.c_int
+    function.errcheck = _check_fixed_point_result
+    output = np.empty(n_elem, dtype=A.dtype)
+    selected = function(*arguments, output.ctypes.data_as(pointer))
+    return selected, output
 
 def shave(A, n_elem, n, config_path):
     dtype_str = _infer_dtype(A)

@@ -24,6 +24,9 @@ if(TEST_CPP_SOURCES)
         target_link_libraries("${test_name}" PRIVATE bit_info)
 
         add_test(NAME "${test_name}" COMMAND "${test_name}")
+        if(test_name STREQUAL "test_capped_selection")
+            set_tests_properties("${test_name}" PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=1")
+        endif()
     endforeach()
 endif()
 
@@ -33,6 +36,11 @@ if(TEST_PY_SOURCES)
         foreach(test_py IN LISTS TEST_PY_SOURCES)
             get_filename_component(test_name "${test_py}" NAME_WE)
             add_test(NAME "py_${test_name}" COMMAND "${Python3_EXECUTABLE}" "${test_py}")
+            if(test_name STREQUAL "test_caps_and_processor")
+                set_tests_properties("py_${test_name}" PROPERTIES ENVIRONMENT
+                    "OMP_NUM_THREADS=1;OPENBLAS_NUM_THREADS=1;MKL_NUM_THREADS=1;PYTHONDONTWRITEBYTECODE=1"
+                )
+            endif()
             if(test_name STREQUAL "test_library_discovery")
                 set_tests_properties("py_${test_name}" PROPERTIES ENVIRONMENT
                     "REAL_INFO_TEST_WRAPPER=${PROJECT_BINARY_DIR}/real_info.py;REAL_INFO_TEST_LIBRARY_RELATIVE_PATH=${REAL_INFO_LIBRARY_RELATIVE_PATH}"
